@@ -1,0 +1,15 @@
+{
+  "provider": {
+    "baseUrl": "https://api.anthropic.com",
+    "api": "anthropic-messages",
+    "apiKey": "YOUR_API_KEY_HERE",
+    "authHeader": true,
+    "models": [
+      { "id": "claude-sonnet-4-5-20250514", "contextWindow": 200000, "maxTokens": 8192 }
+    ]
+  },
+  "model": "claude-sonnet-4-5-20250514",
+  "port": 3333,
+  "maxAgents": 3,
+  "agentTimeoutMs": 300000
+}
