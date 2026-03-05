@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Meridian Dashboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --status-pending: #d29922;
+  --status-running: #58a6ff;
+  --status-completed: #3fb950;
+  --status-failed: #f85149;
+  --status-cancelled: #8b949e;
+  --radius: 8px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+/* Top-level layout */
+#app {
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  height: 100%;
+}
+
+/* Connection bar */
+#conn-bar {
+  padding: 6px 16px;
+  font-size: 12px;
+  text-align: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.3s;
+}
+#conn-bar.connected { background: #0d2818; color: var(--status-completed); }
+#conn-bar.disconnected { background: #2d1117; color: var(--status-failed); }
+#conn-bar.connecting { background: #2a1f00; color: var(--status-pending); }
+
+/* Main grid */
+#main {
+  display: grid;
+  grid-template-columns: 280px 1fr 300px;
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+  min-height: 0;
+}
+
+@media (max-width: 1024px) {
+  #main { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+  #tasks-panel, #agents-panel { max-height: 200px; }
+}
+
+/* Panels */
+.panel {
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.panel-body::-webkit-scrollbar { width: 6px; }
+.panel-body::-webkit-scrollbar-track { background: transparent; }
+.panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Task list */
+.task-item {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+  animation: slideIn 0.2s ease-out;
+  transition: border-color 0.2s;
+}
+.task-item:hover { border-color: var(--accent); }
+
+.task-title {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.task-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.badge-pending   { background: rgba(210,153,34,0.15); color: var(--status-pending); }
+.badge-running   { background: rgba(88,166,255,0.15); color: var(--status-running); }
+.badge-completed { background: rgba(63,185,80,0.15);  color: var(--status-completed); }
+.badge-failed    { background: rgba(248,81,73,0.15);  color: var(--status-failed); }
+.badge-cancelled { background: rgba(139,148,158,0.15); color: var(--status-cancelled); }
+
+/* Feed */
+#feed-body {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.feed-entry {
+  padding: 4px 12px;
+  border-radius: 4px;
+  margin-bottom: 2px;
+  animation: fadeIn 0.15s ease-out;
+  display: flex;
+  gap: 10px;
+}
+.feed-entry:hover { background: rgba(255,255,255,0.03); }
+
+.feed-time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: 11px;
+  padding-top: 1px;
+}
+
+.feed-content {
+  word-break: break-word;
+  flex: 1;
+}
+
+.feed-type-user_message       .feed-content { color: #e2e4e8; }
+.feed-type-doorman_response   .feed-content { color: var(--accent); }
+.feed-type-agent_spawned  .feed-content { color: #d2a8ff; }
+.feed-type-agent_progress .feed-content { color: var(--text-muted); }
+.feed-type-agent_result   .feed-content { color: var(--status-completed); }
+.feed-type-agent_error    .feed-content { color: var(--status-failed); }
+.feed-type-agent_killed   .feed-content { color: var(--status-pending); }
+.feed-type-system         .feed-content { color: var(--text-muted); font-style: italic; }
+
+/* Executor badges */
+.executor-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-left: 6px;
+}
+.executor-badge-claude-code { background: rgba(168,85,247,0.2); color: #c084fc; }
+.executor-badge-llm { background: rgba(88,166,255,0.2); color: var(--accent); }
+
+/* Output bytes */
+.agent-output {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Expandable task result */
+.task-result-toggle {
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  margin-top: 6px;
+  user-select: none;
+}
+.task-result-toggle:hover { text-decoration: underline; }
+.task-result-preview {
+  display: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: rgba(0,0,0,0.3);
+  border-radius: 4px;
+  padding: 8px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.task-result-preview.expanded { display: block; }
+
+/* Agent cards */
+.agent-card {
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+  animation: slideIn 0.2s ease-out;
+  transition: border-color 0.2s;
+}
+.agent-card:hover { border-color: var(--accent); }
+
+.agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.agent-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.agent-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.agent-status-dot.idle    { background: var(--status-cancelled); }
+.agent-status-dot.busy    { background: var(--status-running); animation: pulse 1.5s infinite; }
+.agent-status-dot.error   { background: var(--status-failed); }
+.agent-status-dot.stopped { background: var(--status-cancelled); }
+
+.agent-task, .agent-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Bottom bar */
+#bottom-bar {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+#stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.stat-item strong {
+  color: var(--text);
+  margin-right: 4px;
+}
+
+/* Approvals */
+#approvals {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.approval-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  animation: slideUp 0.2s ease-out;
+  font-size: 13px;
+}
+
+.approval-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.approval-label {
+  color: var(--status-pending);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  margin-right: 8px;
+}
+
+.btn {
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-approve { border-color: var(--status-completed); color: var(--status-completed); }
+.btn-approve:hover { background: rgba(63,185,80,0.2); }
+.btn-reject  { border-color: var(--status-failed); color: var(--status-failed); }
+.btn-reject:hover  { background: rgba(248,81,73,0.2); }
+
+/* Input */
+#input-bar {
+  display: flex;
+  padding: 10px 16px;
+  gap: 10px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+#msg-input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+#msg-input:focus { border-color: var(--accent); }
+#msg-input::placeholder { color: var(--text-muted); }
+
+#send-btn {
+  padding: 10px 20px;
+  background: var(--accent);
+  color: #0d1117;
+  border: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+#send-btn:hover { opacity: 0.85; }
+#send-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Animations */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="conn-bar" class="connecting">Connecting...</div>
+
+  <div id="main">
+    <div class="panel" id="tasks-panel">
+      <div class="panel-header">Tasks</div>
+      <div class="panel-body" id="task-list"></div>
+    </div>
+
+    <div class="panel" id="feed-panel">
+      <div class="panel-header">Live Feed</div>
+      <div class="panel-body" id="feed-body"></div>
+    </div>
+
+    <div class="panel" id="agents-panel">
+      <div class="panel-header">Agents</div>
+      <div class="panel-body" id="agent-list"></div>
+    </div>
+  </div>
+
+  <div id="bottom-bar">
+    <div id="stats-bar">
+      <span class="stat-item"><strong id="stat-tasks">0</strong> active tasks</span>
+      <span class="stat-item"><strong id="stat-agents">0</strong> running agents</span>
+      <span class="stat-item"><strong id="stat-approvals">0</strong> pending approvals</span>
+    </div>
+    <div id="approvals"></div>
+  </div>
+
+  <div id="input-bar">
+    <input type="text" id="msg-input" placeholder="Send a message..." autocomplete="off">
+    <button id="send-btn" disabled>Send</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // --- State ---
+  const state = {
+    tasks: new Map(),
+    agents: new Map(),
+    approvals: new Map(),
+    feeds: [],
+  };
+
+  const MAX_FEED = 2000;
+
+  // --- DOM refs ---
+  const connBar = document.getElementById('conn-bar');
+  const taskList = document.getElementById('task-list');
+  const feedBody = document.getElementById('feed-body');
+  const agentList = document.getElementById('agent-list');
+  const approvalsEl = document.getElementById('approvals');
+  const statTasks = document.getElementById('stat-tasks');
+  const statAgents = document.getElementById('stat-agents');
+  const statApprovals = document.getElementById('stat-approvals');
+  const msgInput = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+
+  // --- Helpers ---
+  function fmtTime(ts) {
+    const d = ts ? new Date(ts) : new Date();
+    return [d.getHours(), d.getMinutes(), d.getSeconds()]
+      .map(n => String(n).padStart(2, '0'))
+      .join(':');
+  }
+
+  function esc(str) {
+    const el = document.createElement('span');
+    el.textContent = str;
+    return el.innerHTML;
+  }
+
+  // --- Rendering ---
+  function renderTasks() {
+    const arr = Array.from(state.tasks.values());
+    taskList.innerHTML = arr.map(t => {
+      const hasResult = t.status === 'completed' && t.result;
+      const resultPreview = hasResult ? t.result.slice(0, 500) : '';
+      return `
+        <div class="task-item" data-id="${esc(t.id)}">
+          <div class="task-title">${esc(t.prompt || t.title || t.description || t.id)}</div>
+          <div class="task-meta">
+            <span class="badge badge-${t.status}">${t.status}</span>
+            <span>${t.updatedAt ? fmtTime(t.updatedAt) : ''}</span>
+          </div>
+          ${hasResult ? `<div class="task-result-toggle" onclick="window._toggleResult(this)">Show result</div><div class="task-result-preview">${esc(resultPreview)}${t.result.length > 500 ? '...' : ''}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+    updateStats();
+  }
+
+  function renderAgents() {
+    const arr = Array.from(state.agents.values());
+    agentList.innerHTML = arr.map(a => {
+      const statusClass = a.status === 'working' ? 'busy' : (a.status || 'idle');
+      const badgeClass = statusClass === 'busy' ? 'running' : statusClass === 'error' ? 'failed' : 'cancelled';
+      const execBadge = a.executor
+        ? `<span class="executor-badge executor-badge-${esc(a.executor)}">${esc(a.executor)}</span>`
+        : '';
+      const elapsed = a.startedAt && a.status === 'working' ? ` data-started="${esc(a.startedAt)}"` : '';
+      const outputStr = a.outputBytes ? formatBytes(a.outputBytes) : '';
+      const task = a.currentTaskId ? state.tasks.get(a.currentTaskId) : null;
+      return `
+        <div class="agent-card" data-id="${esc(a.id)}"${elapsed}>
+          <div class="agent-header">
+            <span class="agent-name"><span class="agent-status-dot ${statusClass}"></span>${esc(a.id)}${execBadge}</span>
+            <span class="badge badge-${badgeClass}">${a.status || statusClass}</span>
+          </div>
+          <div class="agent-task">${a.role || ''}${task ? ': ' + esc(task.prompt.slice(0, 60)) : ''}</div>
+          <div class="agent-time elapsed-timer">${a.startedAt ? 'Started ' + fmtTime(a.startedAt) : ''}</div>
+          ${outputStr ? `<div class="agent-output">${outputStr} output</div>` : ''}
+        </div>
+      `;
+    }).join('');
+    updateStats();
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  function appendFeed(entry) {
+    state.feeds.push(entry);
+    if (state.feeds.length > MAX_FEED) {
+      state.feeds.shift();
+      if (feedBody.firstChild) feedBody.removeChild(feedBody.firstChild);
+    }
+    const el = document.createElement('div');
+    el.className = `feed-entry feed-type-${entry.type || 'system'}`;
+    el.innerHTML = `<span class="feed-time">${fmtTime(entry.timestamp)}</span><span class="feed-content">${esc(entry.message || entry.content || JSON.stringify(entry))}</span>`;
+    feedBody.appendChild(el);
+    feedBody.scrollTop = feedBody.scrollHeight;
+  }
+
+  function renderFeed(entries) {
+    feedBody.innerHTML = '';
+    state.feeds = [];
+    (entries || []).forEach(e => appendFeed(e));
+  }
+
+  function renderApprovals() {
+    const arr = Array.from(state.approvals.values());
+    approvalsEl.innerHTML = arr.map(a => `
+      <div class="approval-item" data-id="${esc(a.id)}">
+        <span class="approval-text"><span class="approval-label">Approval</span>${esc(a.description || a.message || a.id)}</span>
+        <button class="btn btn-approve" onclick="window._approve('${esc(a.id)}')">Approve</button>
+        <button class="btn btn-reject" onclick="window._reject('${esc(a.id)}')">Reject</button>
+      </div>
+    `).join('');
+    updateStats();
+  }
+
+  function updateStats() {
+    const activeTasks = Array.from(state.tasks.values()).filter(t => t.status === 'running' || t.status === 'pending').length;
+    const runningAgents = Array.from(state.agents.values()).filter(a => a.status === 'working' || a.status === 'busy').length;
+    statTasks.textContent = activeTasks;
+    statAgents.textContent = runningAgents;
+    statApprovals.textContent = state.approvals.size;
+  }
+
+  // --- WebSocket ---
+  let ws = null;
+  let reconnectDelay = 500;
+  const MAX_DELAY = 30000;
+
+  function setConnStatus(status, text) {
+    connBar.className = status;
+    connBar.textContent = text;
+  }
+
+  function connect() {
+    setConnStatus('connecting', 'Connecting...');
+    ws = new WebSocket('ws://localhost:3333/ws');
+
+    ws.addEventListener('open', function () {
+      reconnectDelay = 500;
+      setConnStatus('connected', 'Connected');
+      sendBtn.disabled = false;
+    });
+
+    ws.addEventListener('close', function () {
+      setConnStatus('disconnected', 'Disconnected \u2014 reconnecting in ' + Math.round(reconnectDelay / 1000) + 's...');
+      sendBtn.disabled = true;
+      scheduleReconnect();
+    });
+
+    ws.addEventListener('error', function () {
+      // close event will fire after this
+    });
+
+    ws.addEventListener('message', function (ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleMessage(msg);
+    });
+  }
+
+  function scheduleReconnect() {
+    setTimeout(function () {
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);
+      connect();
+    }, reconnectDelay);
+  }
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'state': {
+        const d = msg.data;
+        state.tasks.clear();
+        (d.tasks || []).forEach(t => state.tasks.set(t.id, t));
+        state.agents.clear();
+        (d.agents || []).forEach(a => state.agents.set(a.id, a));
+        state.approvals.clear();
+        (d.approvals || []).forEach(a => state.approvals.set(a.id, a));
+        renderTasks();
+        renderAgents();
+        renderFeed(d.feeds || d.feed || []);
+        renderApprovals();
+        break;
+      }
+      case 'feed':
+        appendFeed(msg.data);
+        break;
+      case 'task_update': {
+        const t = msg.data;
+        state.tasks.set(t.id, t);
+        renderTasks();
+        break;
+      }
+      case 'agent_update': {
+        const a = msg.data;
+        state.agents.set(a.id, a);
+        renderAgents();
+        break;
+      }
+      case 'approval_request': {
+        const ap = msg.data;
+        state.approvals.set(ap.id, ap);
+        renderApprovals();
+        break;
+      }
+    }
+  }
+
+  // --- User actions ---
+  window._approve = function (id) {
+    send({ type: 'approve', approvalId: id });
+    state.approvals.delete(id);
+    renderApprovals();
+  };
+
+  window._reject = function (id) {
+    send({ type: 'reject', approvalId: id });
+    state.approvals.delete(id);
+    renderApprovals();
+  };
+
+  function sendMessage() {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    send({ type: 'message', content: text });
+    appendFeed({ type: 'user_message', message: text, timestamp: new Date().toISOString() });
+    msgInput.value = '';
+  }
+
+  msgInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  sendBtn.addEventListener('click', sendMessage);
+
+  // --- Toggle result preview ---
+  window._toggleResult = function (el) {
+    const preview = el.nextElementSibling;
+    if (preview) {
+      const expanded = preview.classList.toggle('expanded');
+      el.textContent = expanded ? 'Hide result' : 'Show result';
+    }
+  };
+
+  // --- Live elapsed timer for working agents ---
+  setInterval(function () {
+    document.querySelectorAll('.agent-card[data-started]').forEach(function (card) {
+      const started = card.getAttribute('data-started');
+      if (!started) return;
+      const elapsed = Math.round((Date.now() - new Date(started).getTime()) / 1000);
+      const mins = Math.floor(elapsed / 60);
+      const secs = elapsed % 60;
+      const timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+      const timerEl = card.querySelector('.elapsed-timer');
+      if (timerEl) timerEl.textContent = 'Running for ' + timeStr;
+    });
+  }, 1000);
+
+  // --- Boot ---
+  connect();
+})();
+</script>
+</body>
+</html>
