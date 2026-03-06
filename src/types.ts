@@ -21,12 +21,11 @@ export interface UserMessage {
 
 // --- Tasks ---
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-export type AgentRole = 'coder' | 'researcher' | 'writer' | 'general';
 
 export interface Task {
   id: string;
   prompt: string;
-  role: AgentRole;
+  role: string;            // free-form role hint (not hardcoded)
   status: TaskStatus;
   agentId: string | null;
   result: string | null;
@@ -55,7 +54,7 @@ export type AgentStatus = 'idle' | 'working' | 'stopping' | 'stopped';
 
 export interface AgentInfo {
   id: string;
-  role: AgentRole;
+  role: string;
   status: AgentStatus;
   currentTaskId: string | null;
   pid: number | null;
@@ -99,24 +98,6 @@ export interface BlackboardState {
   notes: Note[];
 }
 
-// --- Scheduled tasks (proactive) ---
-export interface ScheduledTask {
-  id: string;
-  cron: string;           // cron expression (e.g. "0 9 * * *" for 9am daily)
-  prompt: string;
-  executor?: string;
-  enabled: boolean;
-  lastRunAt?: string;
-  nextRunAt?: string;
-}
-
-// --- Classifier result ---
-export type Intent =
-  | { type: 'kill'; targetId?: string }
-  | { type: 'status' }
-  | { type: 'approval'; approve: boolean; approvalId?: string }
-  | { type: 'task'; role: AgentRole; prompt: string; executor?: string; continueFrom?: string }
-  | { type: 'chat'; content: string };
 
 // --- Skill ---
 export interface Skill {
@@ -128,6 +109,9 @@ export interface Skill {
   model?: string;       // optional model override for this skill
 }
 
+// --- Permission modes ---
+export type AuditorMode = 'passthrough' | 'constitutional' | 'supervised';
+
 // --- Config ---
 export interface MeridianConfig {
   port: number;
@@ -137,7 +121,8 @@ export interface MeridianConfig {
   agentTimeoutMs: number;
   model: string;
   claudeCliPath?: string;
-  schedules?: ScheduledTask[];
+  auditorMode: AuditorMode;
+  auditorOverrides: Record<string, AuditorMode>;
 }
 
 // --- WebSocket messages (A2UI protocol) ---

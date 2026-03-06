@@ -5,3 +5,6 @@ data/
 *.db
 *.db-journal
 *.db-wal
+.mcp.json
+google-screenshot.png
+*.png

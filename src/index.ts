@@ -11,9 +11,9 @@ import { Doorman } from './doorman/doorman.js';
 import { HttpServer } from './doorman/http-server.js';
 import { CliChannel } from './channels/cli.js';
 import { TelegramChannel } from './channels/telegram.js';
+import { FeishuChannel } from './channels/feishu.js';
 import { createProvider } from './providers/index.js';
-import { Scheduler } from './scheduler.js';
-import { config, providerConfig, telegramConfig, proxyUrl } from './config.js';
+import { config, providerConfig, telegramConfig, feishuConfig, proxyUrl, channelMode, channelDbPath } from './config.js';
 import { logger } from './logger.js';
 
 async function main(): Promise<void> {
@@ -27,10 +27,9 @@ async function main(): Promise<void> {
   // Ensure data directory exists
   fs.mkdirSync(config.dataDir, { recursive: true });
 
-  // 1. Initialize blackboard (SQLite-backed pub/sub)
-  const dbPath = path.join(config.dataDir, 'meridian.db');
-  const blackboard = new Blackboard(dbPath);
-  logger.info({ dbPath }, 'Blackboard initialized');
+  // 1. Initialize blackboard (SQLite-backed pub/sub) — per-channel DB
+  const blackboard = new Blackboard(channelDbPath);
+  logger.info({ dbPath: channelDbPath, channel: channelMode }, 'Blackboard initialized');
 
   // 2. Load skills
   const skills = loadSkills(config.skillsDir);
@@ -52,21 +51,26 @@ async function main(): Promise<void> {
   }
 
   // 5. Create Doorman
-  const doorman = new Doorman(blackboard, runner, registry, provider);
+  const doorman = new Doorman(blackboard, runner, registry);
 
   // 6. Start HTTP server (A2UI + WebSocket)
   const httpServer = new HttpServer(blackboard, doorman);
   await httpServer.start();
 
-  // 7. Connect CLI channel
-  const cli = new CliChannel((msg) => doorman.handleMessage(msg));
-  doorman.addChannel(cli);
-  await cli.connect();
-  logger.info('CLI channel connected');
-
-  // 8. Connect Telegram channel (if configured)
+  // 7. Connect channel based on CHANNEL env var (instance-per-channel mode)
+  let cli: CliChannel | null = null;
   let telegram: TelegramChannel | null = null;
-  if (telegramConfig?.botToken) {
+  let feishu: FeishuChannel | null = null;
+
+  if (channelMode === 'cli') {
+    cli = new CliChannel((msg) => doorman.handleMessage(msg));
+    doorman.addChannel(cli);
+    await cli.connect();
+    logger.info('CLI channel connected');
+  } else if (channelMode === 'telegram') {
+    if (!telegramConfig?.botToken) {
+      throw new Error('CHANNEL=telegram but no telegram.botToken in meridian.json');
+    }
     telegram = new TelegramChannel(
       telegramConfig.botToken,
       (msg) => doorman.handleMessage(msg),
@@ -76,22 +80,31 @@ async function main(): Promise<void> {
     doorman.addChannel(telegram);
     await telegram.connect();
     logger.info('Telegram channel connected');
+  } else if (channelMode === 'feishu') {
+    if (!feishuConfig?.appId || !feishuConfig?.appSecret) {
+      throw new Error('CHANNEL=feishu but no feishu config in meridian.json');
+    }
+    feishu = new FeishuChannel(
+      feishuConfig,
+      (msg) => doorman.handleMessage(msg),
+    );
+    doorman.addChannel(feishu);
+    await feishu.connect();
+    logger.info('Feishu channel connected');
+  } else {
+    throw new Error(`Unknown CHANNEL: ${channelMode}. Supported: cli, telegram, feishu`);
   }
-
-  // 9. Start proactive scheduler (posts tasks to blackboard on cron)
-  const scheduler = new Scheduler(blackboard, config.schedules || []);
-  scheduler.start();
 
   // 10. Ensure per-agent data directory exists
   fs.mkdirSync(path.join(config.dataDir, 'agents'), { recursive: true });
 
-  // 11. Graceful shutdown
+  // 10. Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
-    scheduler.stop();
     runner.killAll();
-    await cli.disconnect();
+    if (cli) await cli.disconnect();
     if (telegram) await telegram.disconnect();
+    if (feishu) await feishu.disconnect();
     await httpServer.stop();
     process.exit(0);
   };

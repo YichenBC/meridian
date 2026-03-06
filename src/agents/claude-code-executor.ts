@@ -18,7 +18,9 @@ export class ClaudeCodeExecutor implements AgentExecutor {
   async execute(params: ExecuteParams): Promise<ExecuteResult> {
     const { task, skill, signal, onProgress } = params;
 
-    const workDir = skill?.baseDir || this.defaultWorkDir || process.cwd();
+    // Always use project root as cwd so .mcp.json (MCP servers) is picked up.
+    // Skill context is passed via the prompt, not via cwd.
+    const workDir = this.defaultWorkDir || process.cwd();
     const args = [
       '--print',
       '--output-format', 'json',

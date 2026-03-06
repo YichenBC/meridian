@@ -1,10 +1,12 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import type { Task, AgentInfo, Skill, AgentRole, FeedEntry, Approval } from '../types.js';
+import type { Task, AgentInfo, Skill, FeedEntry, Approval, AuditorMode } from '../types.js';
 import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRegistry } from './registry.js';
 import { AgentExecutor } from './executor.js';
+import { loadSkills } from '../skills/loader.js';
+import { decide } from '../blackboard/permissions.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -27,6 +29,35 @@ export class AgentRunner {
   ) {
     // React to new tasks posted on the blackboard
     this.blackboard.on('task:created', () => this.drainPending());
+  }
+
+  /**
+   * Reload skills from disk. Called before spawning so newly installed
+   * skills are available without restart.
+   */
+  reloadSkills(): void {
+    this.skills = loadSkills(config.skillsDir);
+  }
+
+  /**
+   * Get currently loaded skills (for classifier context).
+   */
+  getSkills(): Skill[] {
+    return this.skills;
+  }
+
+  /**
+   * Get installed MCP servers from .mcp.json (for classifier context).
+   */
+  getInstalledMCPs(): string[] {
+    try {
+      const mcpPath = path.join(process.cwd(), '.mcp.json');
+      if (!fs.existsSync(mcpPath)) return [];
+      const mcpConfig = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+      return Object.keys(mcpConfig.mcpServers || {});
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -65,7 +96,10 @@ export class AgentRunner {
       return null;
     }
 
-    const skill = this.findSkillForRole(task.role);
+    // Hot-reload skills so newly installed ones are available
+    this.reloadSkills();
+
+    const skill = this.findSkillForTask(task);
     const executor = this.resolveExecutor(skill, task);
     if (!executor) {
       logger.error('No executor available');
@@ -146,8 +180,19 @@ export class AgentRunner {
           this.registry.update(id, { outputBytes: runningAgent.outputBytes });
         },
         requestApproval: async (description) => {
-          logger.info({ agentId: id, description: description.slice(0, 200) }, 'Auto-approved tool request');
-          return true;
+          const mode = this.resolveAuditorMode(skill);
+          const decision = decide(description, mode);
+          if (decision === 'allow') {
+            this.addFeed('system', 'auditor',
+              `[${mode}] Approved: ${description.slice(0, 200)}`, task.id);
+            logger.info({ agentId: id, mode, description: description.slice(0, 200) }, 'Permission auto-approved');
+            return true;
+          }
+          // Escalate to user — park agent and wait for response
+          this.addFeed('system', 'auditor',
+            `[${mode}] Escalating to user: ${description.slice(0, 200)}`, task.id);
+          logger.info({ agentId: id, mode, description: description.slice(0, 200) }, 'Permission escalated to user');
+          return this.createApprovalRequest(id, task.id, description);
         },
       });
 
@@ -268,8 +313,47 @@ export class AgentRunner {
     return this.executors.get(name) || this.executors.values().next().value;
   }
 
-  private findSkillForRole(role: AgentRole): Skill | null {
-    return this.skills.find((s) => s.name.includes(role)) || this.skills[0] || null;
+  /**
+   * Find the best skill for a task.
+   * Matches by: task prompt keywords vs skill name/description.
+   * Falls back to role-based match, then first skill.
+   */
+  private findSkillForTask(task: Task): Skill | null {
+    if (this.skills.length === 0) return null;
+
+    const prompt = task.prompt.toLowerCase();
+
+    // Score each skill by keyword overlap with the task prompt
+    let bestSkill: Skill | null = null;
+    let bestScore = 0;
+
+    for (const skill of this.skills) {
+      const keywords = `${skill.name} ${skill.description}`.toLowerCase().split(/\W+/);
+      let score = 0;
+      for (const kw of keywords) {
+        if (kw.length > 2 && prompt.includes(kw)) score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestSkill = skill;
+      }
+    }
+
+    if (bestSkill && bestScore > 0) return bestSkill;
+
+    // Fallback: match by role name
+    return this.skills.find((s) => s.name.includes(task.role)) || this.skills[0] || null;
+  }
+
+  /**
+   * Resolve the auditor mode for a task.
+   * Priority: per-skill override > global config.
+   */
+  private resolveAuditorMode(skill: Skill | null): AuditorMode {
+    if (skill && config.auditorOverrides[skill.name]) {
+      return config.auditorOverrides[skill.name];
+    }
+    return config.auditorMode;
   }
 
   private addFeed(type: FeedEntry['type'], source: string, content: string, taskId: string | null): void {

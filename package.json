@@ -12,14 +12,18 @@
     "test:docx": "node tests/docx-multiturn.mjs",
     "test:reactive": "node tests/reactive-blackboard.mjs",
     "test:telegram": "node tests/telegram-ux.mjs",
-    "test:unified": "node tests/unified-ux.mjs"
+    "test:unified": "node tests/unified-ux.mjs",
+    "test:proactive": "node tests/proactive-month.mjs",
+    "test:permissions": "npx tsx --test tests/permissions.mjs"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
     "better-sqlite3": "^11.8.1",
     "grammy": "^1.39.3",
     "https-proxy-agent": "^7.0.6",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
+    "qrcode": "^1.5.4",
     "undici": "^7.22.0",
     "ws": "^8.18.0",
     "yaml": "^2.8.2"

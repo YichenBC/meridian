@@ -1,4 +1,4 @@
-import { AgentInfo, AgentRole } from '../types.js';
+import { AgentInfo } from '../types.js';
 import { Blackboard } from '../blackboard/blackboard.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -51,7 +51,7 @@ export class AgentRegistry {
     return this.getAll().filter(a => a.status === 'working');
   }
 
-  getByRole(role: AgentRole): AgentInfo[] {
+  getByRole(role: string): AgentInfo[] {
     return this.getAll().filter(a => a.role === role);
   }
 

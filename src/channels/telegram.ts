@@ -85,13 +85,16 @@ export class TelegramChannel implements Channel {
     if (!this.bot || !this.chatId) return;
 
     try {
-      // Telegram 4096 char limit
+      const html = markdownToTelegramHtml(text);
       const MAX = 4096;
-      if (text.length <= MAX) {
-        await this.bot.api.sendMessage(this.chatId, text);
-      } else {
-        for (let i = 0; i < text.length; i += MAX) {
-          await this.bot.api.sendMessage(this.chatId, text.slice(i, i + MAX));
+      const chunks = html.length <= MAX ? [html] : splitHtmlChunks(html, MAX);
+
+      for (const chunk of chunks) {
+        try {
+          await this.bot.api.sendMessage(this.chatId, chunk, { parse_mode: 'HTML' });
+        } catch {
+          // Fallback: send as plain text if HTML parsing fails
+          await this.bot.api.sendMessage(this.chatId, stripHtml(chunk));
         }
       }
     } catch (err) {
@@ -110,4 +113,59 @@ export class TelegramChannel implements Channel {
       logger.info('Telegram bot stopped');
     }
   }
+}
+
+/**
+ * Convert common markdown to Telegram-supported HTML.
+ * Telegram HTML supports: <b>, <i>, <code>, <pre>, <a>, <s>, <u>
+ */
+function markdownToTelegramHtml(text: string): string {
+  let html = escapeHtml(text);
+
+  // Code blocks: ```lang\ncode\n``` → <pre>code</pre>
+  html = html.replace(/```(?:\w*)\n([\s\S]*?)```/g, '<pre>$1</pre>');
+
+  // Inline code: `code` → <code>code</code>
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold: **text** or __text__
+  html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  html = html.replace(/__(.+?)__/g, '<b>$1</b>');
+
+  // Italic: *text* or _text_ (but not inside words like file_name)
+  html = html.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '<i>$1</i>');
+  html = html.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '<i>$1</i>');
+
+  // Strikethrough: ~~text~~
+  html = html.replace(/~~(.+?)~~/g, '<s>$1</s>');
+
+  // Headers: # Title → <b>Title</b> (Telegram has no headers)
+  html = html.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+
+  // Bullet lists: - item or * item → • item
+  html = html.replace(/^[\s]*[-*]\s+/gm, '• ');
+
+  // Links: [text](url) → <a href="url">text</a>
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  return html;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, '');
+}
+
+function splitHtmlChunks(text: string, maxLen: number): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += maxLen) {
+    chunks.push(text.slice(i, i + maxLen));
+  }
+  return chunks;
 }
