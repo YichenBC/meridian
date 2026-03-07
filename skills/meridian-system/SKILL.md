@@ -13,7 +13,7 @@ You are an agent within the Meridian multi-agent system. You have access to the 
 Location: `data/meridian.db` (SQLite, WAL mode)
 
 Tables:
-- `tasks` — id, prompt, role, status, agentId, result, error, executor, parentTaskId, sessionId, source, createdAt, updatedAt
+- `tasks` — id, prompt, role, status, agentId, result, error, executor, model, parentTaskId, sessionId, source, createdAt, updatedAt
 - `agents` — id, role, status, currentTaskId, pid, startedAt, lastActivityAt, executor, outputBytes, persistent
 - `feeds` — id, type, source, content, taskId, timestamp
 - `approvals` — id, taskId, description, status, createdAt, resolvedAt
@@ -22,7 +22,7 @@ Tables:
 ## HTTP API
 
 All agents can interact with the blackboard via HTTP:
-- `POST /api/tasks` — create a new task (body: `{prompt, role?, executor?, source?}`)
+- `POST /api/tasks` — create a new task (body: `{prompt, role?, executor?, model?, source?}`)
 - `POST /api/notes` — add a note (body: `{title, content, source?, tags?, taskId?}`)
 - `GET /api/notes` — list notes (query: `?limit=50&tag=`)
 - `GET /api/state` — full blackboard snapshot
@@ -34,9 +34,8 @@ src/
   index.ts          — entry point
   types.ts          — shared interfaces
   config.ts         — configuration
-  scheduler.ts      — proactive cron scheduler
   blackboard/       — SQLite + EventEmitter pub/sub
-  doorman/          — user-facing message handler
+  doorman/          — user-facing message handler + HTTP/WS server
   agents/           — runner, registry, executors
   channels/         — CLI, Telegram, Feishu
   providers/        — LLM API providers

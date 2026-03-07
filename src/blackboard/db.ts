@@ -73,6 +73,9 @@ function createSchema(): void {
   // Migration: add source to tasks
   try { db.exec(`ALTER TABLE tasks ADD COLUMN source TEXT`); } catch { /* already exists */ }
 
+  // Migration: add model to tasks (per-agent model selection)
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN model TEXT`); } catch { /* already exists */ }
+
   // Migration: add persistent to agents
   try { db.exec(`ALTER TABLE agents ADD COLUMN persistent INTEGER DEFAULT 0`); } catch { /* already exists */ }
 }
@@ -88,10 +91,10 @@ export function initDatabase(dbPath: string): void {
 
 export function createTask(task: Task): void {
   const stmt = db.prepare(`
-    INSERT INTO tasks (id, prompt, role, status, agentId, result, error, createdAt, updatedAt, parentTaskId, sessionId, executor, source)
-    VALUES (@id, @prompt, @role, @status, @agentId, @result, @error, @createdAt, @updatedAt, @parentTaskId, @sessionId, @executor, @source)
+    INSERT INTO tasks (id, prompt, role, status, agentId, result, error, createdAt, updatedAt, parentTaskId, sessionId, executor, model, source)
+    VALUES (@id, @prompt, @role, @status, @agentId, @result, @error, @createdAt, @updatedAt, @parentTaskId, @sessionId, @executor, @model, @source)
   `);
-  stmt.run({ parentTaskId: null, sessionId: null, executor: null, source: null, ...task });
+  stmt.run({ parentTaskId: null, sessionId: null, executor: null, model: null, source: null, ...task });
 }
 
 export function getTask(id: string): Task | undefined {
@@ -108,7 +111,7 @@ export function updateTask(id: string, updates: Partial<Task>): void {
   const current = getTask(id);
   if (!current) return;
 
-  const merged = { parentTaskId: null, sessionId: null, executor: null, source: null, ...current, ...updates, id };
+  const merged = { parentTaskId: null, sessionId: null, executor: null, model: null, source: null, ...current, ...updates, id };
   const stmt = db.prepare(`
     UPDATE tasks SET
       prompt = @prompt,
@@ -122,6 +125,7 @@ export function updateTask(id: string, updates: Partial<Task>): void {
       parentTaskId = @parentTaskId,
       sessionId = @sessionId,
       executor = @executor,
+      model = @model,
       source = @source
     WHERE id = @id
   `);
@@ -187,6 +191,15 @@ export function addFeed(entry: FeedEntry): void {
 export function getFeeds(limit: number = 100): FeedEntry[] {
   const stmt = db.prepare('SELECT * FROM feeds ORDER BY timestamp DESC LIMIT ?');
   return stmt.all(limit) as FeedEntry[];
+}
+
+export function getFeedsByTask(taskId: string, type?: string, limit: number = 20): FeedEntry[] {
+  if (type) {
+    const stmt = db.prepare('SELECT * FROM feeds WHERE taskId = ? AND type = ? ORDER BY timestamp DESC LIMIT ?');
+    return stmt.all(taskId, type, limit) as FeedEntry[];
+  }
+  const stmt = db.prepare('SELECT * FROM feeds WHERE taskId = ? ORDER BY timestamp DESC LIMIT ?');
+  return stmt.all(taskId, limit) as FeedEntry[];
 }
 
 // --- Approvals ---

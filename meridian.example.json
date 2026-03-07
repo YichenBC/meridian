@@ -9,6 +9,16 @@
     ]
   },
   "model": "claude-sonnet-4-5-20250514",
+  "skillsDir": "/Users/clawassist/projects/meridian/skills",
+  "extraSkillsDirs": [
+    "/Users/clawassist/projects/openclaw/openclaw/skills"
+  ],
+  "claudeCliPath": "/usr/local/bin/claude",
+  "codexCliPath": "/usr/local/bin/codex",
+  "codexExecutionMode": "subprocess",
+  "codexHostBridgeUrl": "http://127.0.0.1:4318/v1/codex/exec",
+  "codexHostBridgeTimeoutMs": 900000,
+  "toolExecutor": "claude-code",
   "port": 3333,
   "maxAgents": 3,
   "agentTimeoutMs": 300000

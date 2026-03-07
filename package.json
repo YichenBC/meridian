@@ -14,7 +14,11 @@
     "test:telegram": "node tests/telegram-ux.mjs",
     "test:unified": "node tests/unified-ux.mjs",
     "test:proactive": "node tests/proactive-month.mjs",
-    "test:permissions": "npx tsx --test tests/permissions.mjs"
+    "test:permissions": "npx tsx --test tests/permissions.mjs",
+    "test:skills": "npm run build && node --test tests/skills-support.mjs",
+    "test:skills:e2e": "npm run build && node tests/skills-e2e.mjs",
+    "test:skills:live": "npm run build && node tests/skills-clawhub-live.mjs",
+    "meridian:skill": "node dist/cli/meridian-skill.js"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",

@@ -4,10 +4,13 @@ import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Blackboard } from '../blackboard/blackboard.js';
 import { Doorman } from './doorman.js';
+import { AgentRunner } from '../agents/runner.js';
 import { UserMessage, WsOutMessage, WsInMessage, Task, Note } from '../types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import crypto from 'crypto';
+import { installSkill } from '../skills/install.js';
+import { SkillInstallMetadata } from '../types.js';
 
 export class HttpServer {
   private server: http.Server;
@@ -17,6 +20,7 @@ export class HttpServer {
   constructor(
     private blackboard: Blackboard,
     private doorman: Doorman,
+    private runner: AgentRunner,
   ) {
     this.server = http.createServer(this.handleRequest.bind(this));
     this.wss = new WebSocketServer({ server: this.server });
@@ -48,13 +52,61 @@ export class HttpServer {
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/skills') {
+      const skills = this.runner.getSkills().map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        executor: skill.executor || null,
+        model: skill.model || null,
+        baseDir: skill.baseDir,
+        sourceDir: skill.sourceDir,
+        install: skill.install || null,
+        openclaw: skill.openclaw || null,
+        eligibility: skill.eligibility,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(skills));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/skills/install') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { sourcePath, name, overwrite } = JSON.parse(body);
+          if (!sourcePath || typeof sourcePath !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'sourcePath is required' }));
+            return;
+          }
+
+          const installed = installSkill({
+            sourcePath,
+            targetRoot: config.skillsDir,
+            name,
+            overwrite: overwrite === true,
+            installMetadata: buildApiInstallMetadata(sourcePath),
+          });
+          this.runner.reloadSkills();
+
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(installed));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Failed to install skill' }));
+        }
+      });
+      return;
+    }
+
     // POST /api/tasks — create task directly on blackboard (for agents, scheduler, external)
     if (req.method === 'POST' && url.pathname === '/api/tasks') {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
         try {
-          const { prompt, role, executor, source } = JSON.parse(body);
+          const { prompt, role, executor, model, source } = JSON.parse(body);
           if (!prompt) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'prompt is required' }));
@@ -69,6 +121,7 @@ export class HttpServer {
             result: null,
             error: null,
             executor: executor || undefined,
+            model: model || undefined,
             source: source || 'api',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -222,7 +275,7 @@ export class HttpServer {
       this.broadcastWs({ type: 'approval_request', data: approval });
     });
     this.blackboard.on('note:created', (note) => {
-      this.broadcastWs({ type: 'note', data: note } as any);
+      this.broadcastWs({ type: 'note', data: note });
     });
   }
 
@@ -259,4 +312,16 @@ export class HttpServer {
       this.server.close(() => resolve());
     });
   }
+}
+
+function buildApiInstallMetadata(sourcePath: string): SkillInstallMetadata {
+  return {
+    installer: 'meridian',
+    installedAt: new Date().toISOString(),
+    source: {
+      kind: 'local-path',
+      reference: sourcePath,
+      resolvedPath: path.resolve(sourcePath),
+    },
+  };
 }

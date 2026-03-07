@@ -1,10 +1,12 @@
-import { Task, Skill } from '../types.js';
+import { Task } from '../types.js';
 import { ModelProvider } from '../providers/types.js';
+import { PreparedTaskContext } from '../skills/context.js';
 
 export interface ExecuteParams {
   task: Task;
-  skill: Skill | null;
+  prepared: PreparedTaskContext;
   signal: AbortSignal;
+  model?: string;          // model override (from task.model or skill.model)
   onProgress: (text: string) => void;
   requestApproval: (description: string) => Promise<boolean>;
 }
@@ -36,18 +38,13 @@ export class LLMExecutor implements AgentExecutor {
   ) {}
 
   async execute(params: ExecuteParams): Promise<ExecuteResult> {
-    const { task, skill, signal, onProgress } = params;
+    const { prepared, signal, model: modelOverride, onProgress } = params;
 
-    let system = `You are a ${task.role} agent. Complete the following task thoroughly and return a clear, concise result.
-You are a pure text agent — you have NO tools, NO file access, NO shell, NO internet. Do NOT output tool calls, XML tags, or code blocks pretending to run commands. Just provide your best answer using your knowledge.`;
-    if (skill) {
-      system += `\n\n## Skill: ${skill.name}\n\n${skill.content}`;
-    }
-
+    const effectiveModel = modelOverride || this.model;
     const result = await this.provider.streamMessage({
-      model: this.model,
-      system,
-      messages: [{ role: 'user', content: task.prompt }],
+      model: effectiveModel,
+      system: prepared.systemPrompt,
+      messages: [{ role: 'user', content: prepared.userPrompt }],
       maxTokens: 8192,
       signal,
       onText: (chunk) => {

@@ -9,8 +9,8 @@ import { describe, it } from 'node:test';
  * without requiring a running Meridian instance.
  */
 
-// Dynamic import of the TS module via tsx loader
-const { decide, assessRisk } = await import('../src/blackboard/permissions.js');
+// Import from compiled output
+const { decide, assessRisk } = await import('../dist/blackboard/permissions.js');
 
 // ─── Risk Assessment ───────────────────────────────────────────────────
 
@@ -55,6 +55,11 @@ describe('assessRisk', () => {
     assert.equal(assessRisk('Send email to team@company.com'), 'high');
   });
 
+  it('classifies host-native execution bridges as high risk', () => {
+    assert.equal(assessRisk('Run codex-cli via host native execution bridge'), 'high');
+    assert.equal(assessRisk('Launch Terminal.app via Apple Events'), 'high');
+  });
+
   it('classifies publish as high risk (external)', () => {
     assert.equal(assessRisk('Execute: npm publish'), 'high');
   });
@@ -90,16 +95,51 @@ describe('assessRisk', () => {
   it('classifies creating new files as low risk', () => {
     assert.equal(assessRisk('Create file src/utils/newHelper.ts'), 'low');
   });
+
+  // ─── Critical risk: self-modification of live system files ────────────
+
+  it('classifies modifying src/index.ts as critical (entry point)', () => {
+    assert.equal(assessRisk('Edit file src/index.ts'), 'critical');
+  });
+
+  it('classifies modifying channel files as critical', () => {
+    assert.equal(assessRisk('Write to src/channels/telegram.ts'), 'critical');
+    assert.equal(assessRisk('Edit src/channels/feishu.ts'), 'critical');
+    assert.equal(assessRisk('Modify src/channels/cli.ts'), 'critical');
+  });
+
+  it('classifies modifying blackboard core as critical', () => {
+    assert.equal(assessRisk('Edit src/blackboard/db.ts'), 'critical');
+    assert.equal(assessRisk('Write to src/blackboard/blackboard.ts'), 'critical');
+  });
+
+  it('classifies modifying package.json as critical', () => {
+    assert.equal(assessRisk('Edit package.json to add dependency'), 'critical');
+    assert.equal(assessRisk('Modify package-lock.json'), 'critical');
+  });
+
+  it('does not classify non-critical src files as critical', () => {
+    assert.equal(assessRisk('Edit src/doorman/doorman.ts'), 'low');
+    assert.equal(assessRisk('Write to src/agents/runner.ts'), 'low');
+    assert.equal(assessRisk('Edit src/providers/index.ts'), 'low');
+  });
 });
 
 // ─── Mode: passthrough ─────────────────────────────────────────────────
 
 describe('decide — passthrough mode', () => {
-  it('allows everything regardless of risk', () => {
+  it('allows low and high risk actions', () => {
     assert.equal(decide('rm -rf /', 'passthrough'), 'allow');
     assert.equal(decide('git push --force', 'passthrough'), 'allow');
     assert.equal(decide('Read file', 'passthrough'), 'allow');
     assert.equal(decide('Deploy to production', 'passthrough'), 'allow');
+  });
+
+  it('still escalates critical risk (self-modification of live system)', () => {
+    assert.equal(decide('Edit file src/index.ts', 'passthrough'), 'ask');
+    assert.equal(decide('Write to src/channels/telegram.ts', 'passthrough'), 'ask');
+    assert.equal(decide('Edit src/blackboard/db.ts', 'passthrough'), 'ask');
+    assert.equal(decide('Edit package.json', 'passthrough'), 'ask');
   });
 });
 
@@ -117,7 +157,7 @@ describe('decide — supervised mode', () => {
 
 describe('decide — constitutional mode', () => {
   it('allows low-risk actions (subsidiarity: agent is competent)', () => {
-    assert.equal(decide('Read file src/index.ts', 'constitutional'), 'allow');
+    assert.equal(decide('Read file src/doorman/doorman.ts', 'constitutional'), 'allow');
     assert.equal(decide('Write to src/utils.ts', 'constitutional'), 'allow');
     assert.equal(decide('Execute: npm test', 'constitutional'), 'allow');
     assert.equal(decide('Search codebase for pattern', 'constitutional'), 'allow');
@@ -128,8 +168,15 @@ describe('decide — constitutional mode', () => {
     assert.equal(decide('Execute: git push origin main', 'constitutional'), 'ask');
     assert.equal(decide('Deploy to production', 'constitutional'), 'ask');
     assert.equal(decide('Send email notification', 'constitutional'), 'ask');
+    assert.equal(decide('Run codex-cli via host native execution bridge', 'constitutional'), 'ask');
     assert.equal(decide('Execute: git reset --hard', 'constitutional'), 'ask');
     assert.equal(decide('npm publish', 'constitutional'), 'ask');
+  });
+
+  it('escalates critical-risk actions (self-modification)', () => {
+    assert.equal(decide('Edit src/channels/feishu.ts', 'constitutional'), 'ask');
+    assert.equal(decide('Modify src/blackboard/blackboard.ts', 'constitutional'), 'ask');
+    assert.equal(decide('Edit src/index.ts', 'constitutional'), 'ask');
   });
 });
 
@@ -139,6 +186,7 @@ describe('edge cases', () => {
   it('handles empty description as low risk', () => {
     assert.equal(assessRisk(''), 'low');
     assert.equal(decide('', 'constitutional'), 'allow');
+    assert.equal(decide('', 'passthrough'), 'allow');
   });
 
   it('is case-insensitive for risk keywords', () => {

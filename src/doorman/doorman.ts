@@ -3,16 +3,18 @@ import { spawn } from 'child_process';
 import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRunner } from '../agents/runner.js';
 import { AgentRegistry } from '../agents/registry.js';
+import { CodexRuntime } from '../agents/codex-runtime.js';
 import { Channel, UserMessage, Task, Approval } from '../types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { executeSkillInstallCommand, parseSkillInstallIntent } from '../skills/commands.js';
 
 /**
- * Doorman action — returned by the Claude Code CLI triage call.
+ * Doorman action — returned by the Doorman CLI triage call.
  */
 interface DoormanAction {
   response: string;
-  tasks?: { prompt: string; executor?: string }[];
+  tasks?: { prompt: string; executor?: string; model?: string }[];
   kill?: boolean | string;
   approve?: { id: string; accept: boolean };
 }
@@ -24,23 +26,41 @@ const APPROVAL_POSITIVE = /\b(approve|yes|accept|confirm|ok|okay|go ahead|do it)
 const APPROVAL_NEGATIVE = /\b(reject|no|deny|decline|don't|cancel)\b/i;
 
 /**
- * The Doorman is a persistent Claude Code CLI session.
+ * The Doorman is a persistent CLI session.
  *
- * User messages become prompts to `claude --print --resume <sessionId>`.
- * Claude Code naturally knows its own model, has tools, and maintains
- * conversation memory via session resumption. No separate LLM API needed.
+ * User messages become prompts to a local CLI brain (`claude` or `codex`)
+ * with session continuity via resume/thread IDs.
  */
 export class Doorman {
   private channels: Channel[] = [];
   private sessionId: string | null = null;
+  private doormanExecutor: string;
   private cliPath: string;
+  private toolExecutor: string;
+  private codexRuntime: CodexRuntime | null = null;
 
   constructor(
     private blackboard: Blackboard,
     private runner: AgentRunner,
     private registry: AgentRegistry,
   ) {
-    this.cliPath = config.claudeCliPath || 'claude';
+    this.doormanExecutor = this.resolveDoormanExecutor();
+    this.cliPath = this.resolveDoormanCliPath(this.doormanExecutor);
+    this.toolExecutor = config.toolExecutor
+      || (config.claudeCliPath ? 'claude-code' : config.codexCliPath ? 'codex-cli' : 'claude-code');
+    if (this.doormanExecutor === 'codex-cli') {
+      this.codexRuntime = new CodexRuntime({
+        cliPath: this.cliPath,
+        mode: config.codexExecutionMode,
+        hostBridgeUrl: config.codexHostBridgeUrl,
+        hostBridgeToken: config.codexHostBridgeToken,
+        hostBridgeTimeoutMs: config.codexHostBridgeTimeoutMs,
+      });
+      if (config.codexExecutionMode === 'host-bridge') {
+        logger.warn('Doorman codex-cli is using host-bridge mode; this path depends on the external host bridge for native-execution safety controls');
+      }
+    }
+    logger.info({ executor: this.doormanExecutor, cliPath: this.cliPath, toolExecutor: this.toolExecutor }, 'Doorman configured');
 
     this.blackboard.on('approval:requested', (approval) => {
       this.broadcast(`Approval needed: ${approval.description}\nReply "approve" or "reject".`);
@@ -48,9 +68,12 @@ export class Doorman {
 
     this.blackboard.on('task:updated', (task: Task) => {
       if (task.status === 'completed' && task.result) {
-        this.broadcast(task.result);
+        const label = task.prompt.length > 60 ? task.prompt.slice(0, 57) + '...' : task.prompt;
+        const executor = task.executor || 'agent';
+        this.broadcast(`[${executor}] ${label}\n\n${task.result}`);
       } else if (task.status === 'failed') {
-        this.broadcast(`Something went wrong: ${task.error || 'Unknown error'}. Let me know if you'd like me to retry.`);
+        const label = task.prompt.length > 60 ? task.prompt.slice(0, 57) + '...' : task.prompt;
+        this.broadcast(`[failed] ${label}\n\n${task.error || 'Unknown error'}. Let me know if you'd like me to retry.`);
       }
     });
   }
@@ -106,14 +129,21 @@ export class Doorman {
       return;
     }
 
-    // --- Claude Code CLI call: triage + respond ---
+    // Skill install intent: natural language or explicit clawhub command
+    const installIntent = parseSkillInstallIntent(trimmed);
+    if (installIntent) {
+      await this.handleSkillInstallCommand(installIntent.reference);
+      return;
+    }
+
+    // --- Doorman CLI call: triage + respond ---
     await this.showTyping();
-    const action = await this.askClaudeCode(trimmed);
+    const action = await this.askDoormanCli(trimmed);
 
     // Execute actions
     if (action.tasks && action.tasks.length > 0) {
       for (const t of action.tasks) {
-        await this.createTask(t.prompt, t.executor);
+        await this.createTask(t.prompt, t.executor, t.model);
       }
     }
 
@@ -136,11 +166,9 @@ export class Doorman {
   }
 
   /**
-   * Ask Claude Code CLI via --print (with --resume for session continuity).
-   * Claude Code IS the Doorman brain — it knows its own model, has memory,
-   * and can answer any question about itself naturally.
+   * Ask the configured Doorman CLI with session continuity.
    */
-  private async askClaudeCode(content: string): Promise<DoormanAction> {
+  private async askDoormanCli(content: string): Promise<DoormanAction> {
     const state = this.blackboard.getState();
     const running = state.agents.filter(a => a.status === 'working');
     const skills = this.runner.getSkills();
@@ -167,35 +195,45 @@ export class Doorman {
     const recentResults = this.buildRecentResults(state);
 
     // The prompt: user message + routing context + agent results
-    // Claude Code already knows about itself — we only add Meridian-specific context
     const prompt = `You are Meridian — a personal AI agent system. You are always on, always responsive. You are the user's primary interface to the system.
 
 Respond with a JSON object (no markdown fences).
-Schema: {"response": "your message to the user", "tasks": [{"prompt": "task description", "executor": "claude-code or omit"}]}
+Schema: {"response": "your message to the user", "tasks": [{"prompt": "task description", "executor": "${this.toolExecutor} or omit", "model": "optional model override"}]}
 
 What you answer directly (no task needed):
 - About yourself: what model you are, what you can do, your capabilities, your name
 - Conversation: greetings, follow-ups, clarifications, acknowledgements
 - System state: what agents are running, queue status, recent results (you have this in your live context below)
+- Knowledge questions: "what does X mean?", "explain Y", "how does Z work?"
 
 What you delegate to an agent (create a task):
 - Anything requiring real-world action: checking services, reading files, running commands, browsing, using MCP tools
 - Work requests: writing code, research, analysis, creating documents
-- Verification: "is X working?", "check Y", "what's in the database"
+- Verification that requires actually checking: "is the server up?", "what's in the database?"
 
 The test: if answering requires tools, shell access, file I/O, or external verification — delegate. If you can answer from self-knowledge and the live context below — answer directly.
 
-When delegating, set "response" to a brief natural ack and create tasks. Use executor "claude-code" for tasks needing tools/files/shell/MCP. Omit executor for pure text generation.
+Examples (follow these patterns):
+- "check if the server is up" → delegate (needs real verification)
+- "what does 'deploy' mean?" → answer directly (knowledge question about a word)
+- "I ran the test yesterday" → answer directly (conversation)
+- "read my package.json" → delegate (needs file access)
+- "write a poem about rain" → delegate (creative work)
+- "how are you?" → answer directly (greeting)
+- "what's in the logs?" → delegate (needs shell access)
+- "can you explain what a blackboard is?" → answer directly (knowledge question)
+
+When delegating, set "response" to a brief natural ack and create tasks. Use executor "${this.toolExecutor}" for tasks needing tools/files/shell/MCP. Omit executor for pure text generation. Optionally set "model" to override the default model for cost control.
 
 Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 'pending').length} queued, ${state.tasks.filter(t => t.status === 'completed').length} completed.${runningCtx}${skillCtx}${mcpCtx}${recentResults}
 
-User message: ${content}`;
+    User message: ${content}`;
 
     try {
-      const result = await this.spawnClaude(prompt);
+      const result = await this.spawnDoorman(prompt);
       return this.parseAction(result.content, content);
     } catch (err) {
-      logger.error({ err }, 'Doorman CLI call failed');
+      logger.error({ err, executor: this.doormanExecutor }, 'Doorman CLI call failed');
       return { response: 'Sorry, something went wrong. Try again or just describe what you need.' };
     }
   }
@@ -224,8 +262,15 @@ User message: ${content}`;
   }
 
   /**
-   * Spawn claude CLI with --print and optional --resume for session continuity.
+   * Spawn the configured Doorman CLI with optional session continuity.
    */
+  private spawnDoorman(prompt: string): Promise<{ content: string; sessionId?: string }> {
+    if (this.doormanExecutor === 'codex-cli') {
+      return this.spawnCodex(prompt);
+    }
+    return this.spawnClaude(prompt);
+  }
+
   private spawnClaude(prompt: string): Promise<{ content: string; sessionId?: string }> {
     return new Promise((resolve, reject) => {
       const args = [
@@ -260,7 +305,7 @@ User message: ${content}`;
       });
 
       child.on('error', (err) => {
-        reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
+        reject(new Error(`Failed to spawn Doorman CLI: ${err.message}`));
       });
 
       child.on('close', (code) => {
@@ -292,6 +337,49 @@ User message: ${content}`;
     });
   }
 
+  private spawnCodex(prompt: string): Promise<{ content: string; sessionId?: string }> {
+    if (!this.codexRuntime) {
+      return Promise.reject(new Error('Codex runtime is not initialized'));
+    }
+
+    logger.debug({
+      resume: this.sessionId || 'new',
+      promptLen: prompt.length,
+      executor: 'codex-cli',
+      launchMode: this.codexRuntime.mode,
+    }, 'Doorman CLI call');
+
+    return this.codexRuntime.invoke({
+      prompt,
+      cwd: process.cwd(),
+      purpose: 'doorman',
+      sessionId: this.sessionId || undefined,
+    }).then((result) => {
+      if (result.sessionId) {
+        this.sessionId = result.sessionId;
+        logger.debug({ sessionId: result.sessionId }, 'Doorman session updated');
+      }
+
+      return {
+        content: result.content,
+        sessionId: result.sessionId,
+      };
+    });
+  }
+
+  private resolveDoormanExecutor(): string {
+    if (config.doormanExecutor) return config.doormanExecutor;
+    if (config.codexCliPath) return 'codex-cli';
+    return 'claude-code';
+  }
+
+  private resolveDoormanCliPath(executor: string): string {
+    if (executor === 'codex-cli') {
+      return config.codexCliPath || 'codex';
+    }
+    return config.claudeCliPath || 'claude';
+  }
+
   private parseAction(raw: string, originalContent: string): DoormanAction {
     let cleaned = raw.trim();
     if (cleaned.startsWith('```')) {
@@ -320,7 +408,7 @@ User message: ${content}`;
         if (NEEDS_ACTION.test(originalContent) && (!action.tasks || action.tasks.length === 0) && !action.kill && !action.approve) {
           logger.info({ originalContent: originalContent.slice(0, 100) }, 'Doorman answered directly but message needs action — forcing task');
           action.response = "Let me look into that for you.";
-          action.tasks = [{ prompt: originalContent, executor: 'claude-code' }];
+          action.tasks = [{ prompt: originalContent, executor: this.toolExecutor }];
         }
 
         return action;
@@ -334,7 +422,7 @@ User message: ${content}`;
       logger.info({ originalContent: originalContent.slice(0, 100) }, 'Fallback: routing as task');
       return {
         response: "Let me look into that for you.",
-        tasks: [{ prompt: originalContent, executor: 'claude-code' }],
+        tasks: [{ prompt: originalContent, executor: this.toolExecutor }],
       };
     }
 
@@ -345,11 +433,27 @@ User message: ${content}`;
     return { response: "Hey! What can I help you with?" };
   }
 
-  private async createTask(prompt: string, executor?: string): Promise<void> {
+  /**
+   * Find the sessionId from the most recent completed task (same executor).
+   * This enables multi-turn: a follow-up task resumes the previous agent's
+   * conversation, so the agent remembers what it did last time.
+   */
+  private findReusableSession(executor?: string): string | undefined {
+    if (!executor) return undefined;
+    const recent = this.blackboard.getAllTasks()
+      .filter(t => t.status === 'completed' && t.executor === executor && t.sessionId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return recent[0]?.sessionId ?? undefined;
+  }
+
+  private async createTask(prompt: string, executor?: string, model?: string): Promise<void> {
     let enrichedPrompt = prompt;
-    if (executor === 'claude-code' && /\b(blackboard|database|sqlite|system.?check|self.?check|diagnos|state|db)\b/i.test(prompt)) {
+    if (this.isToolExecutor(executor) && /\b(blackboard|database|sqlite|system.?check|self.?check|diagnos|state|db)\b/i.test(prompt)) {
       enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${config.dataDir}/meridian.db. Tables: tasks, agents, feeds, approvals, notes. Project root: ${process.cwd()}`;
     }
+
+    // Reuse previous session for multi-turn continuity
+    const sessionId = this.findReusableSession(executor);
 
     const task: Task = {
       id: crypto.randomUUID(),
@@ -360,12 +464,43 @@ User message: ${content}`;
       result: null,
       error: null,
       executor: executor || undefined,
+      model: model || undefined,
+      sessionId,
       source: 'user',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
     this.blackboard.createTask(task);
+  }
+
+  private async handleSkillInstallCommand(reference: string): Promise<void> {
+    try {
+      const installed = await executeSkillInstallCommand({
+        reference,
+        targetRoot: config.skillsDir,
+        extraSkillsDirs: config.extraSkillsDirs,
+      });
+      this.runner.reloadSkills();
+
+      const summary = installed
+        .map((skill) => {
+          const source = skill.installMetadata?.source;
+          if (!source) return skill.name;
+          if (source.kind === 'clawhub') return `${skill.name} (from ClawHub${source.slug ? `: ${source.slug}` : ''})`;
+          if (source.kind === 'extra-skills-dir') return `${skill.name} (from extra skills dir)`;
+          return `${skill.name} (from local path)`;
+        })
+        .join(', ');
+      await this.respond(`Installed skill${installed.length > 1 ? 's' : ''}: ${summary}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown install error';
+      await this.respond(`Skill install failed: ${message}`);
+    }
+  }
+
+  private isToolExecutor(executor?: string): boolean {
+    return executor === 'claude-code' || executor === 'codex-cli';
   }
 
   private async respondStatus(): Promise<void> {

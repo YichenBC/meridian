@@ -6,7 +6,8 @@ import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRegistry } from './registry.js';
 import { AgentExecutor } from './executor.js';
 import { loadSkills } from '../skills/loader.js';
-import { decide } from '../blackboard/permissions.js';
+import { prepareTaskContext } from '../skills/context.js';
+import { decide, assessRisk } from '../blackboard/permissions.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -16,6 +17,7 @@ interface RunningAgent {
   promise: Promise<void>;
   startedAt: number;
   outputBytes: number;
+  lastProgressText: string;
 }
 
 export class AgentRunner {
@@ -36,7 +38,7 @@ export class AgentRunner {
    * skills are available without restart.
    */
   reloadSkills(): void {
-    this.skills = loadSkills(config.skillsDir);
+    this.skills = loadSkills(config.skillsDir, config.extraSkillsDirs);
   }
 
   /**
@@ -135,20 +137,22 @@ export class AgentRunner {
     this.blackboard.updateTask(task.id, { status: 'running', agentId: id });
     this.addFeed('agent_spawned', id, `Agent ${id} spawned for: ${task.prompt.slice(0, 100)}`, task.id);
 
-    // Setup abort + timeout
+    // Setup abort + inactivity check via Blackboard
     const abort = new AbortController();
-    let lastActivity = Date.now();
     const timeout = setInterval(() => {
-      if (Date.now() - lastActivity > config.agentTimeoutMs) {
-        logger.warn({ id }, 'Agent timed out');
+      const agentRecord = this.blackboard.getAgent(id);
+      if (!agentRecord) { clearInterval(timeout); return; }
+      const lastAt = new Date(agentRecord.lastActivityAt).getTime();
+      if (Date.now() - lastAt > config.agentTimeoutMs) {
+        logger.warn({ id, lastActivityAt: agentRecord.lastActivityAt }, 'Agent timed out (no Blackboard activity)');
         abort.abort();
         clearInterval(timeout);
       }
     }, 10000);
 
     // Run executor — tracked promise (not fire-and-forget)
-    const runningAgent: RunningAgent = { abort, timeout, promise: null!, startedAt: Date.now(), outputBytes: 0 };
-    const promise = this.runExecutor(id, task, skill, executor, abort, timeout, runningAgent, () => { lastActivity = Date.now(); });
+    const runningAgent: RunningAgent = { abort, timeout, promise: null!, startedAt: Date.now(), outputBytes: 0, lastProgressText: '' };
+    const promise = this.runExecutor(id, task, skill, executor, abort, timeout, runningAgent);
     runningAgent.promise = promise;
     this.running.set(id, runningAgent);
 
@@ -167,31 +171,62 @@ export class AgentRunner {
     abort: AbortController,
     timeout: NodeJS.Timeout,
     runningAgent: RunningAgent,
-    onActivity: () => void,
   ): Promise<void> {
     try {
+      const effectiveModel = task.model || skill?.model || undefined;
+      const prepared = prepareTaskContext(task, skill);
+
+      // Throttle Blackboard writes: update lastActivityAt every 5s, progress feed every 30s
+      let lastActivityWrite = 0;
+      let lastFeedWrite = 0;
+      let progressBuffer = '';
+
       const result = await executor.execute({
         task,
-        skill,
+        prepared,
         signal: abort.signal,
+        model: effectiveModel,
         onProgress: (chunk) => {
-          onActivity();
-          runningAgent.outputBytes += chunk.length;
-          this.registry.update(id, { outputBytes: runningAgent.outputBytes });
+          const now = Date.now();
+
+          if (chunk.length > 0) {
+            runningAgent.outputBytes += chunk.length;
+            progressBuffer += chunk;
+          }
+
+          // Update agent lastActivityAt in Blackboard (throttled: every 5s)
+          if (now - lastActivityWrite > 5_000) {
+            lastActivityWrite = now;
+            const nowIso = new Date().toISOString();
+            this.blackboard.updateAgent(id, { lastActivityAt: nowIso, outputBytes: runningAgent.outputBytes });
+          }
+
+          // Write progress feed entry to Blackboard (throttled: every 30s, only if meaningful text)
+          if (progressBuffer.length > 0 && now - lastFeedWrite > 30_000) {
+            lastFeedWrite = now;
+            // Keep last ~200 chars as a summary
+            const summary = progressBuffer.length > 200
+              ? '...' + progressBuffer.slice(-200)
+              : progressBuffer;
+            runningAgent.lastProgressText = summary;
+            progressBuffer = '';
+            this.addFeed('agent_progress', id, summary, task.id);
+          }
         },
         requestApproval: async (description) => {
           const mode = this.resolveAuditorMode(skill);
+          const risk = assessRisk(description);
           const decision = decide(description, mode);
           if (decision === 'allow') {
             this.addFeed('system', 'auditor',
-              `[${mode}] Approved: ${description.slice(0, 200)}`, task.id);
-            logger.info({ agentId: id, mode, description: description.slice(0, 200) }, 'Permission auto-approved');
+              `[${mode}/${risk}] Approved: ${description.slice(0, 200)}`, task.id);
+            logger.info({ agentId: id, mode, risk, description: description.slice(0, 200) }, 'Permission auto-approved');
             return true;
           }
           // Escalate to user — park agent and wait for response
           this.addFeed('system', 'auditor',
-            `[${mode}] Escalating to user: ${description.slice(0, 200)}`, task.id);
-          logger.info({ agentId: id, mode, description: description.slice(0, 200) }, 'Permission escalated to user');
+            `[${mode}/${risk}] Escalating to user: ${description.slice(0, 200)}`, task.id);
+          logger.info({ agentId: id, mode, risk, description: description.slice(0, 200) }, 'Permission escalated to user');
           return this.createApprovalRequest(id, task.id, description);
         },
       });
@@ -243,16 +278,40 @@ export class AgentRunner {
 
   /**
    * Get a natural language progress description for a running agent.
+   * Reads real progress from Blackboard feeds + agent record.
    */
   getProgress(id: string): string | null {
     const r = this.running.get(id);
     if (!r) return null;
+
     const elapsed = Math.round((Date.now() - r.startedAt) / 1000);
     const mins = Math.floor(elapsed / 60);
     const secs = elapsed % 60;
     const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-    const output = r.outputBytes > 0 ? `, ${r.outputBytes} bytes produced so far` : ', waiting for output';
-    return `Running for ${timeStr}${output}`;
+
+    // Get latest progress from Blackboard feed or in-memory buffer
+    const agent = this.blackboard.getAgent(id);
+    const taskId = agent?.currentTaskId;
+    let progressSummary = '';
+
+    if (taskId) {
+      const recentFeeds = this.blackboard.getTaskFeeds(taskId, 'agent_progress', 1);
+      if (recentFeeds.length > 0) {
+        // Truncate for display
+        const text = recentFeeds[0].content.replace(/\n/g, ' ').trim();
+        progressSummary = text.length > 120 ? text.slice(-120) : text;
+      }
+    }
+
+    // Fallback to in-memory last progress text if no feed written yet
+    if (!progressSummary && r.lastProgressText) {
+      const text = r.lastProgressText.replace(/\n/g, ' ').trim();
+      progressSummary = text.length > 120 ? text.slice(-120) : text;
+    }
+
+    const output = r.outputBytes > 0 ? `, ${r.outputBytes}B output` : '';
+    const progress = progressSummary ? ` — ${progressSummary}` : '';
+    return `${timeStr}${output}${progress}`;
   }
 
   /**
@@ -310,7 +369,12 @@ export class AgentRunner {
    */
   private resolveExecutor(skill: Skill | null, task?: Task): AgentExecutor | undefined {
     const name = task?.executor || skill?.executor || 'llm';
-    return this.executors.get(name) || this.executors.values().next().value;
+    const preferred = this.executors.get(name);
+    if (preferred) return preferred;
+
+    const fallback = this.executors.get('llm') || this.executors.values().next().value;
+    logger.warn({ requested: name, fallback: fallback?.name }, 'Requested executor unavailable, using fallback');
+    return fallback;
   }
 
   /**
@@ -319,7 +383,8 @@ export class AgentRunner {
    * Falls back to role-based match, then first skill.
    */
   private findSkillForTask(task: Task): Skill | null {
-    if (this.skills.length === 0) return null;
+    const eligibleSkills = this.skills.filter((skill) => skill.eligibility.eligible);
+    if (eligibleSkills.length === 0) return null;
 
     const prompt = task.prompt.toLowerCase();
 
@@ -327,7 +392,7 @@ export class AgentRunner {
     let bestSkill: Skill | null = null;
     let bestScore = 0;
 
-    for (const skill of this.skills) {
+    for (const skill of eligibleSkills) {
       const keywords = `${skill.name} ${skill.description}`.toLowerCase().split(/\W+/);
       let score = 0;
       for (const kw of keywords) {
@@ -342,7 +407,7 @@ export class AgentRunner {
     if (bestSkill && bestScore > 0) return bestSkill;
 
     // Fallback: match by role name
-    return this.skills.find((s) => s.name.includes(task.role)) || this.skills[0] || null;
+    return eligibleSkills.find((s) => s.name.includes(task.role)) || eligibleSkills[0] || null;
   }
 
   /**

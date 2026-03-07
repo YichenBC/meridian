@@ -96,6 +96,10 @@ export class Blackboard extends EventEmitter {
     return db.getFeeds(limit);
   }
 
+  getTaskFeeds(taskId: string, type?: string, limit?: number): FeedEntry[] {
+    return db.getFeedsByTask(taskId, type, limit);
+  }
+
   // --- Approvals ---
 
   requestApproval(approval: Approval): void {

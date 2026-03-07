@@ -7,6 +7,7 @@ import { AgentRegistry } from './agents/registry.js';
 import { AgentRunner } from './agents/runner.js';
 import { LLMExecutor } from './agents/executor.js';
 import { ClaudeCodeExecutor } from './agents/claude-code-executor.js';
+import { CodexCliExecutor } from './agents/codex-cli-executor.js';
 import { Doorman } from './doorman/doorman.js';
 import { HttpServer } from './doorman/http-server.js';
 import { CliChannel } from './channels/cli.js';
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
   logger.info({ dbPath: channelDbPath, channel: channelMode }, 'Blackboard initialized');
 
   // 2. Load skills
-  const skills = loadSkills(config.skillsDir);
+  const skills = loadSkills(config.skillsDir, config.extraSkillsDirs);
   logger.info({ count: skills.length, names: skills.map(s => s.name) }, 'Skills loaded');
 
   // 3. Create model provider
@@ -49,12 +50,16 @@ async function main(): Promise<void> {
     runner.registerExecutor(new ClaudeCodeExecutor(config.claudeCliPath));
     logger.info({ path: config.claudeCliPath }, 'Claude Code executor registered');
   }
+  if (config.codexCliPath) {
+    runner.registerExecutor(new CodexCliExecutor(config.codexCliPath));
+    logger.info({ path: config.codexCliPath }, 'Codex CLI executor registered');
+  }
 
   // 5. Create Doorman
   const doorman = new Doorman(blackboard, runner, registry);
 
   // 6. Start HTTP server (A2UI + WebSocket)
-  const httpServer = new HttpServer(blackboard, doorman);
+  const httpServer = new HttpServer(blackboard, doorman, runner);
   await httpServer.start();
 
   // 7. Connect channel based on CHANNEL env var (instance-per-channel mode)

@@ -92,9 +92,11 @@ export class TelegramChannel implements Channel {
       for (const chunk of chunks) {
         try {
           await this.bot.api.sendMessage(this.chatId, chunk, { parse_mode: 'HTML' });
+          logger.info({ chatId: this.chatId, length: chunk.length }, 'Telegram message sent');
         } catch {
           // Fallback: send as plain text if HTML parsing fails
           await this.bot.api.sendMessage(this.chatId, stripHtml(chunk));
+          logger.info({ chatId: this.chatId, length: stripHtml(chunk).length }, 'Telegram message sent (plain text fallback)');
         }
       }
     } catch (err) {

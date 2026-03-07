@@ -31,6 +31,7 @@ export interface Task {
   result: string | null;
   error: string | null;
   executor?: string;       // preferred executor (e.g. 'claude-code'), null = use skill default
+  model?: string;          // model override for this task (e.g. 'haiku', 'opus'), null = use config default
   parentTaskId?: string;   // links to previous task in multi-turn chain
   sessionId?: string;      // claude-code session ID for --resume
   source?: string;         // who created: 'user', 'agent:<id>', 'scheduler', 'api'
@@ -105,22 +106,63 @@ export interface Skill {
   description: string;
   content: string;      // full SKILL.md body
   baseDir: string;      // resolved absolute path
+  sourceDir: string;    // directory where the skill was discovered
+  install?: SkillInstallMetadata;
   executor?: string;    // which executor to use: 'llm', 'claude-code', etc. defaults to 'llm'
   model?: string;       // optional model override for this skill
+  openclaw?: {
+    always?: boolean;
+    os?: string[];
+    skillKey?: string;
+    primaryEnv?: string;
+    requires?: {
+      bins?: string[];
+      anyBins?: string[];
+      env?: string[];
+      config?: string[];
+    };
+  };
+  eligibility: {
+    eligible: boolean;
+    missing: string[];
+    satisfied: string[];
+    source: 'none' | 'openclaw';
+  };
+}
+
+export interface SkillInstallMetadata {
+  installer: 'meridian';
+  installedAt: string;
+  source: {
+    kind: 'local-path' | 'extra-skills-dir' | 'clawhub';
+    reference: string;
+    resolvedPath?: string;
+    slug?: string;
+    downloadedVia?: 'clawhub';
+  };
 }
 
 // --- Permission modes ---
 export type AuditorMode = 'passthrough' | 'constitutional' | 'supervised';
+export type CodexExecutionMode = 'subprocess' | 'host-bridge';
 
 // --- Config ---
 export interface MeridianConfig {
   port: number;
   dataDir: string;
   skillsDir: string;
+  extraSkillsDirs: string[];
   maxAgents: number;
   agentTimeoutMs: number;
   model: string;
   claudeCliPath?: string;
+  codexCliPath?: string;
+  codexExecutionMode: CodexExecutionMode;
+  codexHostBridgeUrl?: string;
+  codexHostBridgeToken?: string;
+  codexHostBridgeTimeoutMs: number;
+  doormanExecutor?: string; // "claude-code" | "codex-cli"
+  toolExecutor?: string;   // default tool-capable executor for delegated action tasks
   auditorMode: AuditorMode;
   auditorOverrides: Record<string, AuditorMode>;
 }
@@ -131,7 +173,8 @@ export type WsOutMessage =
   | { type: 'feed'; data: FeedEntry }
   | { type: 'task_update'; data: Task }
   | { type: 'agent_update'; data: AgentInfo }
-  | { type: 'approval_request'; data: Approval };
+  | { type: 'approval_request'; data: Approval }
+  | { type: 'note'; data: Note };
 
 export type WsInMessage =
   | { type: 'message'; content: string }

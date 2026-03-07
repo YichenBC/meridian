@@ -7,7 +7,7 @@ export interface ProviderModelConfig {
 
 export interface ProviderConfig {
   baseUrl: string;
-  api: string;          // "anthropic-messages" | "openai-chat" (future)
+  api: string;          // "anthropic-messages" | "openai-chat"
   apiKey: string;
   authHeader: boolean;  // true = x-api-key header, false = Authorization: Bearer
   models: ProviderModelConfig[];

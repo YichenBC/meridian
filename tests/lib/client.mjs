@@ -8,6 +8,7 @@ export class MeridianTestClient {
     this.feeds = [];
     this.tasks = new Map();
     this.agents = new Map();
+    this.notes = [];
     this._listeners = [];
   }
 
@@ -46,6 +47,9 @@ export class MeridianTestClient {
         break;
       case 'agent_update':
         this.agents.set(msg.data.id, msg.data);
+        break;
+      case 'note':
+        this.notes.push(msg.data);
         break;
     }
     // Notify waiters
@@ -131,6 +135,30 @@ export class MeridianTestClient {
 
       const handler = (msg) => {
         if (msg.type === 'task_update' && msg.data.status === status) {
+          clearTimeout(timer);
+          this._listeners = this._listeners.filter(l => l !== handler);
+          resolve(msg.data);
+        }
+      };
+      this._listeners.push(handler);
+    });
+  }
+
+  /**
+   * Wait for a note to appear via WebSocket.
+   */
+  waitForNote(predicate, timeout = 30000) {
+    const existing = this.notes.find(n => predicate(n));
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._listeners = this._listeners.filter(l => l !== handler);
+        reject(new Error(`Timeout waiting for note after ${timeout}ms`));
+      }, timeout);
+
+      const handler = (msg) => {
+        if (msg.type === 'note' && predicate(msg.data)) {
           clearTimeout(timer);
           this._listeners = this._listeners.filter(l => l !== handler);
           resolve(msg.data);

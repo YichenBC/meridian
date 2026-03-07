@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { MeridianConfig, AuditorMode } from './types.js';
+import { MeridianConfig, AuditorMode, CodexExecutionMode } from './types.js';
 import { ProviderConfig } from './providers/types.js';
 
 interface TelegramConfig {
@@ -22,11 +22,19 @@ interface MeridianJsonConfig {
   port?: number;
   dataDir?: string;
   skillsDir?: string;
+  extraSkillsDirs?: string[];
   maxAgents?: number;
   agentTimeoutMs?: number;
   telegram?: TelegramConfig;
   feishu?: FeishuJsonConfig;
   claudeCliPath?: string;
+  codexCliPath?: string;
+  codexExecutionMode?: CodexExecutionMode;
+  codexHostBridgeUrl?: string;
+  codexHostBridgeToken?: string;
+  codexHostBridgeTimeoutMs?: number;
+  doormanExecutor?: string;
+  toolExecutor?: string;
   auditorMode?: AuditorMode;
   auditorOverrides?: Record<string, AuditorMode>;
 }
@@ -53,10 +61,22 @@ export const config: MeridianConfig = {
   port: parseInt(process.env.PORT || process.env.MERIDIAN_PORT || String(jsonConfig.port || 3333), 10),
   dataDir: process.env.MERIDIAN_DATA_DIR || jsonConfig.dataDir || path.join(process.cwd(), 'data'),
   skillsDir: process.env.MERIDIAN_SKILLS_DIR || jsonConfig.skillsDir || path.join(process.cwd(), 'skills'),
+  extraSkillsDirs: (process.env.MERIDIAN_EXTRA_SKILLS_DIRS
+    ? process.env.MERIDIAN_EXTRA_SKILLS_DIRS.split(path.delimiter)
+    : jsonConfig.extraSkillsDirs || [])
+    .map((dir) => dir.trim())
+    .filter(Boolean),
   maxAgents: parseInt(process.env.MERIDIAN_MAX_AGENTS || String(jsonConfig.maxAgents || 3), 10),
-  agentTimeoutMs: parseInt(process.env.MERIDIAN_AGENT_TIMEOUT || String(jsonConfig.agentTimeoutMs || 300000), 10),
+  agentTimeoutMs: parseInt(process.env.MERIDIAN_AGENT_TIMEOUT || String(jsonConfig.agentTimeoutMs || 900000), 10),
   model: jsonConfig.model,
   claudeCliPath: process.env.MERIDIAN_CLAUDE_CLI || jsonConfig.claudeCliPath || undefined,
+  codexCliPath: process.env.MERIDIAN_CODEX_CLI || jsonConfig.codexCliPath || undefined,
+  codexExecutionMode: (process.env.MERIDIAN_CODEX_EXEC_MODE || jsonConfig.codexExecutionMode || 'subprocess') as CodexExecutionMode,
+  codexHostBridgeUrl: process.env.MERIDIAN_CODEX_HOST_BRIDGE_URL || jsonConfig.codexHostBridgeUrl || undefined,
+  codexHostBridgeToken: process.env.MERIDIAN_CODEX_HOST_BRIDGE_TOKEN || jsonConfig.codexHostBridgeToken || undefined,
+  codexHostBridgeTimeoutMs: parseInt(process.env.MERIDIAN_CODEX_HOST_BRIDGE_TIMEOUT || String(jsonConfig.codexHostBridgeTimeoutMs || 900000), 10),
+  doormanExecutor: process.env.MERIDIAN_DOORMAN_EXECUTOR || jsonConfig.doormanExecutor || undefined,
+  toolExecutor: process.env.MERIDIAN_TOOL_EXECUTOR || jsonConfig.toolExecutor || undefined,
   auditorMode: (process.env.MERIDIAN_AUDITOR_MODE || jsonConfig.auditorMode || 'passthrough') as AuditorMode,
   auditorOverrides: jsonConfig.auditorOverrides || {},
 };
