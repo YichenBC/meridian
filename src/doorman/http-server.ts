@@ -31,6 +31,29 @@ export class HttpServer {
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url || '/', `http://localhost:${config.port}`);
 
+    // Health endpoint — no auth required
+    if (req.method === 'GET' && url.pathname === '/health') {
+      const state = this.blackboard.getState();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        uptime: process.uptime(),
+        tasks: { total: state.tasks.length, running: state.tasks.filter(t => t.status === 'running').length },
+        agents: state.agents.length,
+      }));
+      return;
+    }
+
+    // Bearer token auth for /api/* endpoints (if configured)
+    if (url.pathname.startsWith('/api/') && config.apiToken) {
+      const auth = req.headers.authorization;
+      if (!auth || auth !== `Bearer ${config.apiToken}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+    }
+
     if (req.method === 'GET' && url.pathname === '/') {
       // Serve A2UI
       const htmlPath = path.join(process.cwd(), 'a2ui', 'index.html');

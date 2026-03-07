@@ -37,6 +37,7 @@ interface MeridianJsonConfig {
   toolExecutor?: string;
   auditorMode?: AuditorMode;
   auditorOverrides?: Record<string, AuditorMode>;
+  apiToken?: string;
 }
 
 function loadMeridianJson(): MeridianJsonConfig {
@@ -79,6 +80,7 @@ export const config: MeridianConfig = {
   toolExecutor: process.env.MERIDIAN_TOOL_EXECUTOR || jsonConfig.toolExecutor || undefined,
   auditorMode: (process.env.MERIDIAN_AUDITOR_MODE || jsonConfig.auditorMode || 'passthrough') as AuditorMode,
   auditorOverrides: jsonConfig.auditorOverrides || {},
+  apiToken: process.env.MERIDIAN_API_TOKEN || jsonConfig.apiToken || undefined,
 };
 
 // Per-channel SQLite DB path (e.g., data/telegram.db, data/feishu.db)

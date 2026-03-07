@@ -167,6 +167,7 @@ export interface MeridianConfig {
   toolExecutor?: string;   // default tool-capable executor for delegated action tasks
   auditorMode: AuditorMode;
   auditorOverrides: Record<string, AuditorMode>;
+  apiToken?: string;          // bearer token for /api/* endpoints (optional)
 }
 
 // --- WebSocket messages (A2UI protocol) ---
