@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Proactive Month Simulation — 2 test cases
@@ -18,6 +19,8 @@ import { sleep, log } from './lib/helpers.mjs';
 const API_BASE = 'http://localhost:3333';
 const CRON_MARKER = '# MERIDIAN_TEST_PROACTIVE';
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
+const INTERACTIVE_SOURCE = 'a2ui:0';
 let passed = 0;
 let failed = 0;
 
@@ -84,7 +87,7 @@ async function waitForTask(taskId, timeout = 120000) {
 
 function installTestCron() {
   const dailyBrief = `* * * * * curl -s -X POST ${API_BASE}/api/tasks -H 'Content-Type: application/json' -d '{"prompt":"Generate daily brief: summarize key priorities","source":"cron"}' ${CRON_MARKER}`;
-  const monitoring = `* * * * * curl -s -X POST ${API_BASE}/api/tasks -H 'Content-Type: application/json' -d '{"prompt":"System health check: report disk, memory, uptime","executor":"claude-code","source":"cron"}' ${CRON_MARKER}`;
+  const monitoring = `* * * * * curl -s -X POST ${API_BASE}/api/tasks -H 'Content-Type: application/json' -d '{"prompt":"System health check: report disk, memory, uptime","executor":"${toolExecutor}","source":"cron"}' ${CRON_MARKER}`;
 
   let existing = '';
   try { existing = execSync('crontab -l 2>/dev/null', { encoding: 'utf-8' }); } catch { /* no crontab */ }
@@ -200,7 +203,7 @@ try {
     for (let i = 0; i < MONITORING.length; i++) {
       const { status, data } = await httpPost('/api/tasks', {
         prompt: MONITORING[i],
-        executor: 'claude-code',
+        executor: toolExecutor,
         source: 'cron',
       });
       assert.equal(status, 201, `Monitoring ${i + 1} should be created`);
@@ -299,7 +302,7 @@ try {
         // Find the new task
         await sleep(1000);
         const newUserTask = Array.from(client.tasks.values())
-          .find(t => t.source === 'user' && t.prompt?.includes(userAction.content.slice(0, 20))
+          .find(t => t.source === INTERACTIVE_SOURCE && t.prompt?.includes(userAction.content.slice(0, 20))
             && !userTaskIds.includes(t.id));
         if (newUserTask) userTaskIds.push(newUserTask.id);
       } else if (userAction.type === 'status') {
@@ -313,7 +316,7 @@ try {
         const monPrompt = `Week ${week} monitoring: check system health`;
         const { data: monData } = await httpPost('/api/tasks', {
           prompt: monPrompt,
-          executor: 'claude-code',
+          executor: toolExecutor,
           source: 'cron',
         });
         allTaskIds.push(monData.id);
@@ -352,7 +355,7 @@ try {
     // Verify results
     const finalState = await httpGet('/api/state');
     const cronTasks = finalState.data.tasks.filter(t => t.source === 'cron');
-    const userTasks = finalState.data.tasks.filter(t => t.source === 'user');
+    const userTasks = finalState.data.tasks.filter(t => t.source === INTERACTIVE_SOURCE);
     const completedCron = cronTasks.filter(t => t.status === 'completed').length;
     const completedUser = userTasks.filter(t => t.status === 'completed').length;
 

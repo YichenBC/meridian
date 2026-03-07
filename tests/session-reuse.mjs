@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Session Reuse & Result Attribution Tests
@@ -14,6 +15,7 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const port = process.env.PORT || 3333;
 const client = new MeridianTestClient(`ws://localhost:${port}/ws`);
+const { toolExecutor } = getRuntimeConfig();
 let passed = 0;
 let failed = 0;
 
@@ -40,17 +42,30 @@ async function waitIdle(timeout = 120000) {
   }
 }
 
+async function waitForNewCompletedTask(taskIdsBefore, timeout = 120000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const completed = Array.from(client.tasks.values())
+      .filter(t => !taskIdsBefore.has(t.id) && (t.status === 'completed' || t.status === 'failed'))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (completed[0]) return completed[0];
+    await sleep(500);
+  }
+  return null;
+}
+
 try {
   await client.connect();
   log('=== Session Reuse & Result Attribution Test ===\n');
 
   // --- Test 1: First task completes and stores sessionId ---
   await test('First task stores sessionId', async () => {
+    const taskIdsBefore = new Set(client.tasks.keys());
     client.send('check the contents of package.json and tell me the version');
 
-    const completed = await client.waitForTaskStatus('completed', 120000);
+    const completed = await waitForNewCompletedTask(taskIdsBefore, 120000);
     assert.ok(completed, 'Task should complete');
-    assert.ok(completed.executor === 'claude-code', `Should use claude-code executor, got: ${completed.executor}`);
+    assert.ok(completed.executor === toolExecutor, `Should use ${toolExecutor}, got: ${completed.executor}`);
     assert.ok(completed.sessionId, 'Task should have sessionId after completion');
     log(`First task sessionId: ${completed.sessionId}`);
   });
@@ -62,7 +77,7 @@ try {
   await test('Follow-up task reuses sessionId from previous task', async () => {
     // Get the sessionId from the first completed task
     const completedTasks = Array.from(client.tasks.values())
-      .filter(t => t.status === 'completed' && t.sessionId && t.executor === 'claude-code')
+      .filter(t => t.status === 'completed' && t.sessionId && t.executor === toolExecutor)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const previousSessionId = completedTasks[0]?.sessionId;
     assert.ok(previousSessionId, 'Should have a previous sessionId');
@@ -70,13 +85,14 @@ try {
     // Use a prompt that forces delegation (needs file access)
     client.send('now read the README.md file and summarize it');
 
+    const taskIdsBefore = new Set(client.tasks.keys());
     // Wait for the new task to complete
-    const completed = await client.waitForTaskStatus('completed', 120000);
+    const completed = await waitForNewCompletedTask(taskIdsBefore, 120000);
     assert.ok(completed, 'Follow-up task should complete');
 
     // Find the task that was created AFTER the first one
     const allTasks = Array.from(client.tasks.values())
-      .filter(t => t.executor === 'claude-code')
+      .filter(t => t.executor === toolExecutor)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const newestTask = allTasks[0];
 
@@ -93,7 +109,7 @@ try {
   // --- Test 3: Task results have executor field for attribution ---
   await test('Completed tasks have executor metadata for attribution', async () => {
     const completed = Array.from(client.tasks.values())
-      .filter(t => t.status === 'completed');
+      .filter(t => t.status === 'completed' && t.executor === toolExecutor);
 
     assert.ok(completed.length >= 1, `Should have at least 1 completed task, got ${completed.length}`);
 

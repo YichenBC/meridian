@@ -5,9 +5,9 @@ import { AgentRunner } from '../agents/runner.js';
 import { AgentRegistry } from '../agents/registry.js';
 import { CodexRuntime } from '../agents/codex-runtime.js';
 import { Channel, UserMessage, Task, Approval } from '../types.js';
-import { config } from '../config.js';
+import { config, channelDbPath } from '../config.js';
 import { logger } from '../logger.js';
-import { executeSkillInstallCommand, parseSkillInstallIntent } from '../skills/commands.js';
+import { buildSkillInstallTaskPrompt, parseSkillInstallIntent } from '../skills/commands.js';
 
 /**
  * Doorman action — returned by the Doorman CLI triage call.
@@ -33,7 +33,7 @@ const APPROVAL_NEGATIVE = /\b(reject|no|deny|decline|don't|cancel)\b/i;
  */
 export class Doorman {
   private channels: Channel[] = [];
-  private sessionId: string | null = null;
+  private sessionIds: Map<string, string> = new Map();
   private doormanExecutor: string;
   private cliPath: string;
   private toolExecutor: string;
@@ -63,17 +63,27 @@ export class Doorman {
     logger.info({ executor: this.doormanExecutor, cliPath: this.cliPath, toolExecutor: this.toolExecutor }, 'Doorman configured');
 
     this.blackboard.on('approval:requested', (approval) => {
-      this.broadcast(`Approval needed: ${approval.description}\nReply "approve" or "reject".`);
+      const task = this.blackboard.getTask(approval.taskId);
+      const channelId = this.resolveRouteableSource(task?.source);
+      if (channelId) {
+        this.sendToChannels(`Approval needed: ${approval.description}\nReply "approve" or "reject".`, channelId);
+      }
     });
 
     this.blackboard.on('task:updated', (task: Task) => {
+      const channelId = this.resolveRouteableSource(task.source);
+      if (!channelId) return;
       if (task.status === 'completed' && task.result) {
+        if (task.executor === 'skill-installer') {
+          this.sendToChannels(task.result, channelId);
+          return;
+        }
         const label = task.prompt.length > 60 ? task.prompt.slice(0, 57) + '...' : task.prompt;
         const executor = task.executor || 'agent';
-        this.broadcast(`[${executor}] ${label}\n\n${task.result}`);
+        this.sendToChannels(`[${executor}] ${label}\n\n${task.result}`, channelId);
       } else if (task.status === 'failed') {
         const label = task.prompt.length > 60 ? task.prompt.slice(0, 57) + '...' : task.prompt;
-        this.broadcast(`[failed] ${label}\n\n${task.error || 'Unknown error'}. Let me know if you'd like me to retry.`);
+        this.sendToChannels(`[failed] ${label}\n\n${task.error || 'Unknown error'}. Let me know if you'd like me to retry.`, channelId);
       }
     });
   }
@@ -97,16 +107,19 @@ export class Doorman {
     // --- Fast path: handle locally without CLI call ---
 
     // Approval responses
-    const pendingApprovals = this.blackboard.getPendingApprovals();
+    const pendingApprovals = this.blackboard.getPendingApprovals().filter((approval) => {
+      const task = this.blackboard.getTask(approval.taskId);
+      return this.resolveRouteableSource(task?.source) === msg.channelId;
+    });
     if (pendingApprovals.length > 0 && trimmed.split(/\s+/).length <= 5) {
       if (APPROVAL_POSITIVE.test(trimmed)) {
         this.blackboard.resolveApproval(pendingApprovals[0].id, 'approved');
-        await this.respond('Approved.');
+        await this.respond('Approved.', msg.channelId);
         return;
       }
       if (APPROVAL_NEGATIVE.test(trimmed)) {
         this.blackboard.resolveApproval(pendingApprovals[0].id, 'rejected');
-        await this.respond('Rejected.');
+        await this.respond('Rejected.', msg.channelId);
         return;
       }
     }
@@ -115,35 +128,36 @@ export class Doorman {
     if (KILL_ALL_PATTERNS.test(trimmed)) {
       const running = this.registry.getRunning();
       if (running.length === 0) {
-        await this.respond('Nothing running right now.');
+        await this.respond('Nothing running right now.', msg.channelId);
       } else {
         this.runner.killAll();
-        await this.respond(`Stopped all ${running.length} running task${running.length > 1 ? 's' : ''}.`);
+        await this.respond(`Stopped all ${running.length} running task${running.length > 1 ? 's' : ''}.`, msg.channelId);
       }
       return;
     }
 
     // Status
     if (STATUS_PATTERNS.test(trimmed)) {
-      await this.respondStatus();
+      await this.respondStatus(msg.channelId);
       return;
     }
 
-    // Skill install intent: natural language or explicit clawhub command
+    // Skill install intent: route through the blackboard task pipeline, not direct mutation
     const installIntent = parseSkillInstallIntent(trimmed);
     if (installIntent) {
-      await this.handleSkillInstallCommand(installIntent.reference);
+      await this.createTask(buildSkillInstallTaskPrompt(installIntent.reference), 'skill-installer', undefined, msg.channelId);
+      await this.respond(`Installing skill "${installIntent.reference}".`, msg.channelId);
       return;
     }
 
     // --- Doorman CLI call: triage + respond ---
-    await this.showTyping();
-    const action = await this.askDoormanCli(trimmed);
+    await this.showTyping(msg.channelId);
+    const action = await this.askDoormanCli(trimmed, msg.channelId);
 
     // Execute actions
     if (action.tasks && action.tasks.length > 0) {
       for (const t of action.tasks) {
-        await this.createTask(t.prompt, t.executor, t.model);
+        await this.createTask(t.prompt, t.executor, t.model, msg.channelId);
       }
     }
 
@@ -162,15 +176,20 @@ export class Doorman {
       );
     }
 
-    await this.respond(action.response);
+    await this.respond(action.response, msg.channelId);
   }
 
   /**
    * Ask the configured Doorman CLI with session continuity.
    */
-  private async askDoormanCli(content: string): Promise<DoormanAction> {
+  private async askDoormanCli(content: string, channelId: string): Promise<DoormanAction> {
     const state = this.blackboard.getState();
-    const running = state.agents.filter(a => a.status === 'working');
+    const scopedTasks = state.tasks.filter((task) => this.resolveRouteableSource(task.source) === channelId);
+    const running = state.agents.filter((a) => {
+      if (a.status !== 'working') return false;
+      const task = state.tasks.find((t) => t.id === a.currentTaskId);
+      return this.resolveRouteableSource(task?.source) === channelId;
+    });
     const skills = this.runner.getSkills();
     const mcps = this.runner.getInstalledMCPs();
 
@@ -192,7 +211,7 @@ export class Doorman {
       : '';
 
     // Include recent task results so Doorman remembers what agents discovered
-    const recentResults = this.buildRecentResults(state);
+    const recentResults = this.buildRecentResults(state, channelId);
 
     // The prompt: user message + routing context + agent results
     const prompt = `You are Meridian — a personal AI agent system. You are always on, always responsive. You are the user's primary interface to the system.
@@ -225,12 +244,12 @@ Examples (follow these patterns):
 
 When delegating, set "response" to a brief natural ack and create tasks. Use executor "${this.toolExecutor}" for tasks needing tools/files/shell/MCP. Omit executor for pure text generation. Optionally set "model" to override the default model for cost control.
 
-Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 'pending').length} queued, ${state.tasks.filter(t => t.status === 'completed').length} completed.${runningCtx}${skillCtx}${mcpCtx}${recentResults}
+Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 'pending').length} queued, ${scopedTasks.filter(t => t.status === 'completed').length} completed.${runningCtx}${skillCtx}${mcpCtx}${recentResults}
 
     User message: ${content}`;
 
     try {
-      const result = await this.spawnDoorman(prompt);
+      const result = await this.spawnDoorman(prompt, channelId);
       return this.parseAction(result.content, content);
     } catch (err) {
       logger.error({ err, executor: this.doormanExecutor }, 'Doorman CLI call failed');
@@ -243,9 +262,9 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
    * what its agents discovered. Without this, the --resume session only
    * contains triage calls, not the actual work results.
    */
-  private buildRecentResults(state: import('../types.js').BlackboardState): string {
+  private buildRecentResults(state: import('../types.js').BlackboardState, channelId: string): string {
     const recentCompleted = state.tasks
-      .filter(t => t.status === 'completed' && t.result)
+      .filter((t) => t.status === 'completed' && t.result && this.resolveRouteableSource(t.source) === channelId)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, 5);  // last 5 completed tasks
 
@@ -264,14 +283,14 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
   /**
    * Spawn the configured Doorman CLI with optional session continuity.
    */
-  private spawnDoorman(prompt: string): Promise<{ content: string; sessionId?: string }> {
+  private spawnDoorman(prompt: string, channelId: string): Promise<{ content: string; sessionId?: string }> {
     if (this.doormanExecutor === 'codex-cli') {
-      return this.spawnCodex(prompt);
+      return this.spawnCodex(prompt, channelId);
     }
-    return this.spawnClaude(prompt);
+    return this.spawnClaude(prompt, channelId);
   }
 
-  private spawnClaude(prompt: string): Promise<{ content: string; sessionId?: string }> {
+  private spawnClaude(prompt: string, channelId: string): Promise<{ content: string; sessionId?: string }> {
     return new Promise((resolve, reject) => {
       const args = [
         '--print',
@@ -279,13 +298,15 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
         '--dangerously-skip-permissions',
       ];
 
-      if (this.sessionId) {
-        args.push('--resume', this.sessionId);
+      const sessionId = this.sessionIds.get(channelId) || null;
+
+      if (sessionId) {
+        args.push('--resume', sessionId);
       }
 
       args.push(prompt);
 
-      logger.debug({ resume: this.sessionId || 'new', promptLen: prompt.length }, 'Doorman CLI call');
+      logger.debug({ resume: sessionId || 'new', promptLen: prompt.length, channelId }, 'Doorman CLI call');
 
       const child = spawn(this.cliPath, args, {
         cwd: process.cwd(),
@@ -324,8 +345,8 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
 
           // Store session for next call (conversation continuity)
           if (sessionId) {
-            this.sessionId = sessionId;
-            logger.debug({ sessionId }, 'Doorman session updated');
+            this.sessionIds.set(channelId, sessionId);
+            logger.debug({ sessionId, channelId }, 'Doorman session updated');
           }
 
           resolve({ content, sessionId });
@@ -337,27 +358,30 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
     });
   }
 
-  private spawnCodex(prompt: string): Promise<{ content: string; sessionId?: string }> {
+  private spawnCodex(prompt: string, channelId: string): Promise<{ content: string; sessionId?: string }> {
     if (!this.codexRuntime) {
       return Promise.reject(new Error('Codex runtime is not initialized'));
     }
 
+    const sessionId = this.sessionIds.get(channelId) || null;
+
     logger.debug({
-      resume: this.sessionId || 'new',
+      resume: sessionId || 'new',
       promptLen: prompt.length,
       executor: 'codex-cli',
       launchMode: this.codexRuntime.mode,
+      channelId,
     }, 'Doorman CLI call');
 
     return this.codexRuntime.invoke({
       prompt,
       cwd: process.cwd(),
       purpose: 'doorman',
-      sessionId: this.sessionId || undefined,
+      sessionId: sessionId || undefined,
     }).then((result) => {
       if (result.sessionId) {
-        this.sessionId = result.sessionId;
-        logger.debug({ sessionId: result.sessionId }, 'Doorman session updated');
+        this.sessionIds.set(channelId, result.sessionId);
+        logger.debug({ sessionId: result.sessionId, channelId }, 'Doorman session updated');
       }
 
       return {
@@ -405,7 +429,7 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
         // the message clearly needs real-world action, force-delegate.
         // Trust the LLM's routing for ambiguous cases — only override
         // when the message obviously requires tools/verification.
-        if (NEEDS_ACTION.test(originalContent) && (!action.tasks || action.tasks.length === 0) && !action.kill && !action.approve) {
+        if (this.messageNeedsAction(originalContent, NEEDS_ACTION) && (!action.tasks || action.tasks.length === 0) && !action.kill && !action.approve) {
           logger.info({ originalContent: originalContent.slice(0, 100) }, 'Doorman answered directly but message needs action — forcing task');
           action.response = "Let me look into that for you.";
           action.tasks = [{ prompt: originalContent, executor: this.toolExecutor }];
@@ -418,7 +442,7 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
     }
 
     // Fallback for non-JSON: if it needs action, delegate; otherwise use as response
-    if (NEEDS_ACTION.test(originalContent)) {
+    if (this.messageNeedsAction(originalContent, NEEDS_ACTION)) {
       logger.info({ originalContent: originalContent.slice(0, 100) }, 'Fallback: routing as task');
       return {
         response: "Let me look into that for you.",
@@ -433,27 +457,50 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
     return { response: "Hey! What can I help you with?" };
   }
 
+  private messageNeedsAction(content: string, needsActionPattern: RegExp): boolean {
+    const normalized = content.trim().toLowerCase();
+    const directAnswerPatterns = [
+      /^what does .+ mean\??$/,
+      /^(can you )?explain\b.+/,
+      /^how does .+ work\??$/,
+      /^how do you .+ internally\??$/,
+      /^let me check with you\b.+/,
+      /^i ran .+ yesterday\b.+/,
+    ];
+
+    if (directAnswerPatterns.some((pattern) => pattern.test(normalized))) {
+      return false;
+    }
+
+    return needsActionPattern.test(content);
+  }
+
   /**
    * Find the sessionId from the most recent completed task (same executor).
    * This enables multi-turn: a follow-up task resumes the previous agent's
    * conversation, so the agent remembers what it did last time.
    */
-  private findReusableSession(executor?: string): string | undefined {
+  private findReusableSession(executor?: string, source?: string): string | undefined {
     if (!executor) return undefined;
     const recent = this.blackboard.getAllTasks()
-      .filter(t => t.status === 'completed' && t.executor === executor && t.sessionId)
+      .filter((t) =>
+        t.status === 'completed'
+        && t.executor === executor
+        && t.sessionId
+        && (source ? this.resolveRouteableSource(t.source) === source : true)
+      )
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return recent[0]?.sessionId ?? undefined;
   }
 
-  private async createTask(prompt: string, executor?: string, model?: string): Promise<void> {
+  private async createTask(prompt: string, executor?: string, model?: string, source?: string): Promise<void> {
     let enrichedPrompt = prompt;
     if (this.isToolExecutor(executor) && /\b(blackboard|database|sqlite|system.?check|self.?check|diagnos|state|db)\b/i.test(prompt)) {
-      enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${config.dataDir}/meridian.db. Tables: tasks, agents, feeds, approvals, notes. Project root: ${process.cwd()}`;
+      enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${channelDbPath}. Tables: tasks, agents, feeds, approvals, notes. Project root: ${process.cwd()}`;
     }
 
     // Reuse previous session for multi-turn continuity
-    const sessionId = this.findReusableSession(executor);
+    const sessionId = this.findReusableSession(executor, source);
 
     const task: Task = {
       id: crypto.randomUUID(),
@@ -466,7 +513,7 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
       executor: executor || undefined,
       model: model || undefined,
       sessionId,
-      source: 'user',
+      source: source || 'user',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -474,41 +521,20 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
     this.blackboard.createTask(task);
   }
 
-  private async handleSkillInstallCommand(reference: string): Promise<void> {
-    try {
-      const installed = await executeSkillInstallCommand({
-        reference,
-        targetRoot: config.skillsDir,
-        extraSkillsDirs: config.extraSkillsDirs,
-      });
-      this.runner.reloadSkills();
-
-      const summary = installed
-        .map((skill) => {
-          const source = skill.installMetadata?.source;
-          if (!source) return skill.name;
-          if (source.kind === 'clawhub') return `${skill.name} (from ClawHub${source.slug ? `: ${source.slug}` : ''})`;
-          if (source.kind === 'extra-skills-dir') return `${skill.name} (from extra skills dir)`;
-          return `${skill.name} (from local path)`;
-        })
-        .join(', ');
-      await this.respond(`Installed skill${installed.length > 1 ? 's' : ''}: ${summary}`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown install error';
-      await this.respond(`Skill install failed: ${message}`);
-    }
-  }
-
   private isToolExecutor(executor?: string): boolean {
     return executor === 'claude-code' || executor === 'codex-cli';
   }
 
-  private async respondStatus(): Promise<void> {
+  private async respondStatus(channelId: string): Promise<void> {
     const state = this.blackboard.getState();
-    const running = state.agents.filter(a => a.status === 'working');
-    const pendingTasks = state.tasks.filter(t => t.status === 'pending');
-    const completedTasks = state.tasks.filter(t => t.status === 'completed');
-    const pendingApprovals = state.approvals.filter(a => a.status === 'pending');
+    const scopedTasks = state.tasks.filter((task) => this.resolveRouteableSource(task.source) === channelId);
+    const running = state.agents.filter((a) => a.status === 'working' && scopedTasks.some((task) => task.id === a.currentTaskId));
+    const pendingTasks = scopedTasks.filter(t => t.status === 'pending');
+    const completedTasks = scopedTasks.filter(t => t.status === 'completed');
+    const pendingApprovals = state.approvals.filter((approval) => {
+      const task = this.blackboard.getTask(approval.taskId);
+      return this.resolveRouteableSource(task?.source) === channelId;
+    });
 
     let status = '';
     if (running.length === 0 && pendingTasks.length === 0) {
@@ -533,10 +559,10 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
       status += `\n${completedTasks.length} completed so far.`;
     }
 
-    await this.respond(status);
+    await this.respond(status, channelId);
   }
 
-  private async respond(text: string): Promise<void> {
+  private async respond(text: string, channelId?: string): Promise<void> {
     this.blackboard.addFeed({
       id: crypto.randomUUID(),
       type: 'doorman_response',
@@ -545,22 +571,28 @@ Live context: ${running.length} running, ${state.tasks.filter(t => t.status === 
       taskId: null,
       timestamp: new Date().toISOString(),
     });
-    await this.broadcast(text);
+    await this.sendToChannels(text, channelId);
   }
 
-  private async showTyping(): Promise<void> {
+  private async showTyping(channelId?: string): Promise<void> {
     for (const channel of this.channels) {
       if (channel.isConnected() && channel.setTyping) {
-        await channel.setTyping(true).catch(() => {});
+        await channel.setTyping(true, channelId).catch(() => {});
       }
     }
   }
 
-  private async broadcast(text: string): Promise<void> {
+  private async sendToChannels(text: string, channelId?: string): Promise<void> {
     for (const channel of this.channels) {
       if (channel.isConnected()) {
-        await channel.sendMessage(text);
+        await channel.sendMessage(text, channelId);
       }
     }
+  }
+
+  private resolveRouteableSource(source?: string): string | undefined {
+    if (!source) return undefined;
+    if (/^(tg|feishu|cli|a2ui):/.test(source)) return source;
+    return undefined;
   }
 }

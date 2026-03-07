@@ -15,6 +15,11 @@ export class Blackboard extends EventEmitter {
     super();
     db.initDatabase(dbPath);
     this.cleanupStaleState();
+    // Rotate old feed entries on startup to prevent unbounded growth
+    const deleted = db.rotateFeeds(5000);
+    if (deleted > 0) {
+      logger.info({ deleted }, 'Rotated old feed entries');
+    }
   }
 
   /**
@@ -47,6 +52,10 @@ export class Blackboard extends EventEmitter {
 
   getAllTasks(): Task[] {
     return db.getAllTasks();
+  }
+
+  claimTask(id: string): boolean {
+    return db.claimTask(id);
   }
 
   updateTask(id: string, updates: Partial<Task>): void {
@@ -85,6 +94,10 @@ export class Blackboard extends EventEmitter {
     this.emit('agent:removed', id);
   }
 
+  areBlockersComplete(blockedBy: string[]): boolean {
+    return db.areBlockersComplete(blockedBy);
+  }
+
   // --- Feed ---
 
   addFeed(entry: FeedEntry): void {
@@ -98,6 +111,10 @@ export class Blackboard extends EventEmitter {
 
   getTaskFeeds(taskId: string, type?: string, limit?: number): FeedEntry[] {
     return db.getFeedsByTask(taskId, type, limit);
+  }
+
+  rotateFeeds(keepCount?: number): number {
+    return db.rotateFeeds(keepCount);
   }
 
   // --- Approvals ---
@@ -136,6 +153,10 @@ export class Blackboard extends EventEmitter {
 
   getNotes(limit?: number): Note[] {
     return db.getNotes(limit);
+  }
+
+  getTaskNotes(taskId: string): Note[] {
+    return db.getNotesByTask(taskId);
   }
 
   getNotesByTag(tag: string): Note[] {

@@ -15,15 +15,31 @@ export class MeridianTestClient {
   connect() {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.url);
+      let opened = false;
+      let resolved = false;
+      const stateTimer = setTimeout(() => {
+        if (opened && !resolved) {
+          resolved = true;
+          resolve();
+        }
+      }, 5000);
       this.ws.on('open', () => {
         log('Connected to Meridian');
-        resolve();
+        opened = true;
       });
-      this.ws.on('error', reject);
+      this.ws.on('error', (err) => {
+        clearTimeout(stateTimer);
+        reject(err);
+      });
       this.ws.on('message', (raw) => {
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch { return; }
         this._handleMessage(msg);
+        if (msg.type === 'state' && !resolved) {
+          clearTimeout(stateTimer);
+          resolved = true;
+          resolve();
+        }
       });
     });
   }

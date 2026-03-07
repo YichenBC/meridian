@@ -8,6 +8,7 @@ import { AgentRunner } from './agents/runner.js';
 import { LLMExecutor } from './agents/executor.js';
 import { ClaudeCodeExecutor } from './agents/claude-code-executor.js';
 import { CodexCliExecutor } from './agents/codex-cli-executor.js';
+import { SkillInstallerExecutor } from './agents/skill-installer-executor.js';
 import { Doorman } from './doorman/doorman.js';
 import { HttpServer } from './doorman/http-server.js';
 import { CliChannel } from './channels/cli.js';
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
 
   // Register executors — unified interface, diverse implementations
   runner.registerExecutor(new LLMExecutor(provider, config.model));
+  runner.registerExecutor(new SkillInstallerExecutor(() => runner.reloadSkills()));
   if (config.claudeCliPath) {
     runner.registerExecutor(new ClaudeCodeExecutor(config.claudeCliPath));
     logger.info({ path: config.claudeCliPath }, 'Claude Code executor registered');

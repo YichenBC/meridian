@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Model Selection E2E Test — 4 cases
@@ -19,6 +20,7 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const API_BASE = 'http://localhost:3333';
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
 let passed = 0;
 let failed = 0;
 
@@ -120,12 +122,12 @@ try {
   await test('Two tasks with different models both complete', async () => {
     const { data: task1 } = await httpPost('/api/tasks', {
       prompt: 'write a one-word response: "alpha"',
-      executor: 'claude-code',
+      executor: toolExecutor,
       source: 'model-test',
     });
     const { data: task2 } = await httpPost('/api/tasks', {
       prompt: 'write a one-word response: "beta"',
-      executor: 'claude-code',
+      executor: toolExecutor,
       source: 'model-test',
     });
 
@@ -150,7 +152,7 @@ try {
     const feedsBefore = client.feeds.length;
     const { data } = await httpPost('/api/tasks', {
       prompt: 'say "model visibility test"',
-      executor: 'claude-code',
+      executor: toolExecutor,
       source: 'model-test',
     });
 

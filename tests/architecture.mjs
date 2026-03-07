@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getDoormanHints, getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Architecture E2E Tests — validates core design philosophy:
@@ -16,6 +17,8 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const API_BASE = 'http://localhost:3333';
 const client = new MeridianTestClient();
+const { doormanExecutor, toolExecutor } = getRuntimeConfig();
+const doormanHints = getDoormanHints(doormanExecutor);
 let passed = 0;
 let failed = 0;
 
@@ -68,15 +71,14 @@ try {
   await client.connect();
   log('=== Architecture E2E Tests ===');
 
-  // 1. Doorman self-awareness — Claude Code CLI knows its model
-  await test('Doorman knows its own model (Claude Code self-awareness)', async () => {
+  // 1. Doorman self-awareness — the configured doorman knows its model/provider
+  await test('Doorman knows its own model/provider', async () => {
     const resp = await sendAndWaitResponse('what model are you? answer concisely');
     assert.ok(resp, 'Should get response');
     const content = resp.content.toLowerCase();
-    // Claude Code CLI knows it runs Claude — should mention claude/sonnet/opus/haiku
     assert.ok(
-      content.includes('claude') || content.includes('sonnet') || content.includes('opus') || content.includes('haiku'),
-      `Should mention Claude model, got: ${resp.content.slice(0, 150)}`
+      doormanHints.some((hint) => content.includes(hint)),
+      `Should mention one of ${doormanHints.join(', ')}, got: ${resp.content.slice(0, 150)}`
     );
     log(`Model response: ${resp.content.slice(0, 150)}`);
   });
@@ -118,7 +120,7 @@ try {
   await sleep(1000);
 
   // 4. System introspection via task — not hardcoded in Doorman
-  await test('System check creates claude-code task (not hardcoded answer)', async () => {
+  await test('System check creates a tool task (not hardcoded answer)', async () => {
     const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
     client.send('check the meridian database and tell me how many tables it has');
@@ -127,11 +129,11 @@ try {
       f => client.feeds.indexOf(f) >= feedsBefore, 30000);
     assert.ok(ack, 'Should get acknowledgment');
 
-    // Should spawn a claude-code task (system introspection needs tools)
+    // Should spawn a tool task (system introspection needs tools)
     await sleep(2000);
     const sysTask = Array.from(client.tasks.values())
-      .find(t => !taskIdsBefore.has(t.id) && (t.executor === 'claude-code'));
-    assert.ok(sysTask, 'System check should create a claude-code task');
+      .find(t => !taskIdsBefore.has(t.id) && t.executor === toolExecutor);
+    assert.ok(sysTask, `System check should create a ${toolExecutor} task`);
     log(`Task created: executor=${sysTask.executor}, prompt=${sysTask.prompt.slice(0, 80)}`);
 
     // Wait for completion
@@ -229,8 +231,8 @@ try {
     if (toolTask) {
       // Should use executor routing, not role-based
       assert.ok(
-        toolTask.executor === 'claude-code',
-        `File-reading task should route to claude-code executor, got: ${toolTask.executor}`
+        toolTask.executor === toolExecutor,
+        `File-reading task should route to ${toolExecutor}, got: ${toolTask.executor}`
       );
       assert.equal(toolTask.role, 'general',
         `Role should be generic "general", not a hardcoded role like "coder". Got: ${toolTask.role}`);

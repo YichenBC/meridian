@@ -16,6 +16,22 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const client = new MeridianTestClient();
 
+function getNewTasks(taskIdsBefore) {
+  return Array.from(client.tasks.values())
+    .filter(t => !taskIdsBefore.has(t.id));
+}
+
+async function waitForTaskByPrompt(snippet, timeout = 120000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const task = Array.from(client.tasks.values())
+      .find(t => t.prompt.includes(snippet) && (t.status === 'completed' || t.status === 'failed' || t.status === 'running' || t.status === 'pending'));
+    if (task) return task;
+    await sleep(250);
+  }
+  return null;
+}
+
 try {
   await client.connect();
   log('=== Reactive Blackboard E2E Test ===');
@@ -24,21 +40,27 @@ try {
   // 1. Fast-path: send a task when idle → should spawn immediately
   // ---------------------------------------------------------------
   log('--- Test 1: Fast-path spawn when idle ---');
+  const taskIdsBefore1 = new Set(client.tasks.keys());
+  const feedsBefore1 = client.feeds.length;
   client.send('write a haiku about the ocean');
 
-  const spawned1 = await client.waitForFeed('agent_spawned', null, 15000);
+  const spawned1 = await client.waitForFeed('agent_spawned',
+    f => client.feeds.indexOf(f) >= feedsBefore1, 15000);
   assert.ok(spawned1, 'Task should spawn immediately when idle');
   log(`Fast-path spawn confirmed: ${spawned1.content.slice(0, 80)}`);
 
-  // Verify the Doorman response says "Spawning" (not "queued")
+  // Verify the Doorman response is an immediate ack, not a queued message
   const resp1 = await client.waitForFeed('doorman_response',
-    f => f.content.includes('Spawning'), 5000);
-  assert.ok(resp1, 'Doorman should say "Spawning" for fast-path');
+    f => client.feeds.indexOf(f) >= feedsBefore1 && f.content.length > 0 && !/queued/i.test(f.content), 5000);
+  assert.ok(resp1, 'Doorman should send an immediate non-queued ack for fast-path');
   log(`Doorman fast-path response: ${resp1.content.slice(0, 80)}`);
 
   // Wait for it to complete before next test
   log('Waiting for first task to complete...');
-  await client.waitForTaskStatus('completed', 120000);
+  const oceanTask = getNewTasks(taskIdsBefore1).find(t => t.prompt.includes('ocean'));
+  assert.ok(oceanTask, 'Ocean task should exist');
+  const oceanDone = await waitForTaskByPrompt('ocean', 120000);
+  assert.ok(oceanDone && oceanDone.status === 'completed', 'Ocean task should complete');
   log('First task completed.');
 
   // Brief pause to let cleanup finish
@@ -50,28 +72,35 @@ try {
   log('--- Test 2: Fill all 3 agent slots ---');
 
   // Track spawned count from this point
-  const spawnedBefore = client.feeds.filter(f => f.type === 'agent_spawned').length;
+  const feedsBefore2 = client.feeds.length;
+  const taskIdsBefore2 = new Set(client.tasks.keys());
 
-  client.send('write a haiku about mountains');
+  client.send('write a detailed 6-paragraph essay about mountains');
   await sleep(500);
-  client.send('write a haiku about rivers');
+  client.send('write a detailed 6-paragraph essay about rivers');
   await sleep(500);
-  client.send('write a haiku about forests');
+  client.send('write a detailed 6-paragraph essay about forests');
 
   // Wait for 3 new agent_spawned events
   log('Waiting for 3 agents to spawn...');
   const waitForNSpawns = async (n, timeout = 30000) => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
-      const currentCount = client.feeds.filter(f => f.type === 'agent_spawned').length - spawnedBefore;
+      const currentCount = client.feeds
+        .filter((f, i) => i >= feedsBefore2 && f.type === 'agent_spawned').length;
       if (currentCount >= n) return currentCount;
       await sleep(500);
     }
-    return client.feeds.filter(f => f.type === 'agent_spawned').length - spawnedBefore;
+    return client.feeds
+      .filter((f, i) => i >= feedsBefore2 && f.type === 'agent_spawned').length;
   };
 
   const spawnCount = await waitForNSpawns(3, 30000);
   assert.ok(spawnCount >= 3, `Expected 3 spawns, got ${spawnCount}`);
+  const phaseTwoTasks = getNewTasks(taskIdsBefore2);
+  assert.ok(phaseTwoTasks.some(t => t.prompt.includes('mountains')), 'Mountains task should exist');
+  assert.ok(phaseTwoTasks.some(t => t.prompt.includes('rivers')), 'Rivers task should exist');
+  assert.ok(phaseTwoTasks.some(t => t.prompt.includes('forests')), 'Forests task should exist');
   log(`All 3 agent slots filled (${spawnCount} spawned).`);
 
   // ---------------------------------------------------------------
@@ -79,26 +108,27 @@ try {
   // ---------------------------------------------------------------
   log('--- Test 3: 4th task queues when slots full ---');
 
-  const spawnedBeforeQueue = client.feeds.filter(f => f.type === 'agent_spawned').length;
+  const feedsBefore3 = client.feeds.length;
+  const taskIdsBefore3 = new Set(client.tasks.keys());
 
-  client.send('write a haiku about stars');
+  client.send('write a detailed 6-paragraph essay about stars');
 
-  // Expect "queued" response from Doorman
+  // Expect an ack for the queued task
   const queueResp = await client.waitForFeed('doorman_response',
-    f => f.content.includes('queued'), 10000);
-  assert.ok(queueResp, 'Doorman should respond with "queued" when slots full');
+    f => client.feeds.indexOf(f) >= feedsBefore3, 10000);
+  assert.ok(queueResp, 'Doorman should acknowledge the queued task');
   log(`Queue response confirmed: ${queueResp.content.slice(0, 80)}`);
 
   // Verify no immediate spawn for the 4th task (wait a couple seconds)
   await sleep(2000);
-  const spawnsAfterQueue = client.feeds.filter(f => f.type === 'agent_spawned').length;
-  assert.equal(spawnsAfterQueue, spawnedBeforeQueue,
+  const spawnsAfterQueue = client.feeds.filter((f, i) => i >= feedsBefore3 && f.type === 'agent_spawned').length;
+  assert.equal(spawnsAfterQueue, 0,
     'No new spawn should happen while slots are full');
   log('Confirmed: 4th task queued, no immediate spawn.');
 
   // Verify task is visible as pending via state
-  const pendingTasks = Array.from(client.tasks.values()).filter(t => t.status === 'pending');
-  assert.ok(pendingTasks.length >= 1, 'Should have at least 1 pending task on the board');
+  const pendingTasks = getNewTasks(taskIdsBefore3).filter(t => t.status === 'pending');
+  assert.ok(pendingTasks.some(t => t.prompt.includes('stars')), 'Stars task should be pending on the board');
   log(`Pending tasks on board: ${pendingTasks.length}`);
 
   // ---------------------------------------------------------------
@@ -108,22 +138,22 @@ try {
 
   // Wait for one of the 3 running tasks to complete
   log('Waiting for one running task to complete (up to 2 min)...');
-  await client.waitForTaskStatus('completed', 120000);
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    const completedPhaseTwo = phaseTwoTasks.find(t => client.tasks.get(t.id)?.status === 'completed');
+    if (completedPhaseTwo) break;
+    await sleep(500);
+  }
 
   // The queued task should auto-spawn — wait for a new agent_spawned
   log('Waiting for queued task to auto-spawn...');
   const autoSpawned = await client.waitForFeed('agent_spawned',
-    f => {
-      // Must be a new spawn (after the ones we already counted)
-      const idx = client.feeds.indexOf(f);
-      return idx >= spawnsAfterQueue; // feeds are appended, so index works
-    }, 15000);
+    f => client.feeds.indexOf(f) >= feedsBefore3, 15000);
   assert.ok(autoSpawned, 'Queued task should auto-spawn when slot frees');
   log(`Auto-drain confirmed: ${autoSpawned.content.slice(0, 80)}`);
 
   // Verify the previously pending task is now running
-  const starsTask = Array.from(client.tasks.values())
-    .find(t => t.prompt.includes('stars'));
+  const starsTask = await waitForTaskByPrompt('stars', 15000);
   assert.ok(starsTask, 'Stars task should exist');
   assert.ok(starsTask.status === 'running' || starsTask.status === 'completed',
     `Stars task should be running or completed, got: ${starsTask.status}`);

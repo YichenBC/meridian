@@ -22,6 +22,7 @@ export class FeishuChannel implements Channel {
   private readonly DEDUP_TTL_MS = 30 * 60 * 1000;
   private lastChatId: string | null = null;
   private lastMessageId: string | null = null;
+  private lastMessageIdByChat = new Map<string, string>();
   private typingReactionId: string | null = null;
 
   constructor(feishuConfig: FeishuConfig, onMessage: OnInboundMessage) {
@@ -125,6 +126,9 @@ export class FeishuChannel implements Channel {
     const chatId = message.chat_id;
     this.lastChatId = chatId;  // Track for broadcast replies
     this.lastMessageId = messageId;  // Track for typing indicator
+    if (messageId) {
+      this.lastMessageIdByChat.set(chatId, messageId);
+    }
     const sender = data?.sender;
     const senderName =
       sender?.sender_id?.open_id ||
@@ -156,12 +160,14 @@ export class FeishuChannel implements Channel {
     }
   }
 
-  async setTyping(active: boolean): Promise<void> {
-    if (active && this.lastMessageId) {
+  async setTyping(active: boolean, targetChannelId?: string): Promise<void> {
+    const chatId = this.resolveChatId(targetChannelId);
+    const messageId = chatId ? this.lastMessageIdByChat.get(chatId) || null : this.lastMessageId;
+    if (active && messageId) {
       // Add a "Typing" emoji reaction to the user's message
       try {
         const response: any = await this.client.im.messageReaction.create({
-          path: { message_id: this.lastMessageId },
+          path: { message_id: messageId },
           data: { reaction_type: { emoji_type: 'Typing' } },
         });
         this.typingReactionId = response?.data?.reaction_id ?? null;
@@ -189,13 +195,14 @@ export class FeishuChannel implements Channel {
     }
   }
 
-  async sendMessage(text: string): Promise<void> {
-    if (!this.lastChatId) {
+  async sendMessage(text: string, targetChannelId?: string): Promise<void> {
+    const chatId = this.resolveChatId(targetChannelId);
+    if (!chatId) {
       logger.warn('FeishuChannel.sendMessage: no chat_id yet (no inbound message received)');
       return;
     }
     await this.removeTypingIndicator();
-    await this.sendToChat(this.lastChatId, text);
+    await this.sendToChat(chatId, text);
   }
 
   /**
@@ -246,6 +253,12 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  private resolveChatId(targetChannelId?: string): string | null {
+    if (!targetChannelId) return this.lastChatId;
+    if (!targetChannelId.startsWith('feishu:')) return null;
+    return targetChannelId.slice('feishu:'.length);
+  }
+
   isConnected(): boolean {
     return this.wsClient !== null;
   }
@@ -254,6 +267,7 @@ export class FeishuChannel implements Channel {
     if (this.wsClient) {
       this.wsClient = null;
       this.seenMessages.clear();
+      this.lastMessageIdByChat.clear();
       logger.info('Feishu bot stopped');
     }
   }

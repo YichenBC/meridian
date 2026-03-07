@@ -72,6 +72,7 @@ export class HttpServer {
     if (req.method === 'POST' && url.pathname === '/api/skills/install') {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
+      req.on('error', () => { if (!res.writableEnded) { res.writeHead(400); res.end(); } });
       req.on('end', () => {
         try {
           const { sourcePath, name, overwrite } = JSON.parse(body);
@@ -104,9 +105,10 @@ export class HttpServer {
     if (req.method === 'POST' && url.pathname === '/api/tasks') {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
+      req.on('error', () => { if (!res.writableEnded) { res.writeHead(400); res.end(); } });
       req.on('end', () => {
         try {
-          const { prompt, role, executor, model, source } = JSON.parse(body);
+          const { prompt, role, executor, model, source, blockedBy, priority } = JSON.parse(body);
           if (!prompt) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'prompt is required' }));
@@ -123,6 +125,8 @@ export class HttpServer {
             executor: executor || undefined,
             model: model || undefined,
             source: source || 'api',
+            blockedBy: Array.isArray(blockedBy) ? blockedBy : undefined,
+            priority: typeof priority === 'number' ? priority : 0,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
@@ -141,6 +145,7 @@ export class HttpServer {
     if (req.method === 'POST' && url.pathname === '/api/notes') {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
+      req.on('error', () => { if (!res.writableEnded) { res.writeHead(400); res.end(); } });
       req.on('end', () => {
         try {
           const { title, content, source, tags, taskId } = JSON.parse(body);
@@ -190,6 +195,7 @@ export class HttpServer {
 
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
+      req.on('error', () => { if (!res.writableEnded) { res.writeHead(400); res.end(); } });
       req.on('end', () => {
         try {
           const { action } = JSON.parse(body);
@@ -243,7 +249,9 @@ export class HttpServer {
           content: msg.content,
           timestamp: new Date().toISOString(),
         };
-        this.doorman.handleMessage(userMsg);
+        this.doorman.handleMessage(userMsg).catch((err) => {
+          logger.warn({ err }, 'Failed to handle WebSocket message');
+        });
         break;
       }
       case 'approve':

@@ -35,7 +35,8 @@ export class CliChannel implements Channel {
     this.rl.on('close', () => { this.connected = false; });
   }
 
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, targetChannelId?: string): Promise<void> {
+    if (targetChannelId && targetChannelId !== 'cli:0') return;
     console.log(`\x1b[36mmeridian>\x1b[0m ${text}`);
     this.rl?.prompt();
   }

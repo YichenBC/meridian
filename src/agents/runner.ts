@@ -6,7 +6,7 @@ import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRegistry } from './registry.js';
 import { AgentExecutor } from './executor.js';
 import { loadSkills } from '../skills/loader.js';
-import { prepareTaskContext } from '../skills/context.js';
+import { prepareTaskContext, BlackboardContext } from '../skills/context.js';
 import { decide, assessRisk } from '../blackboard/permissions.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -29,8 +29,11 @@ export class AgentRunner {
     private registry: AgentRegistry,
     private skills: Skill[],
   ) {
-    // React to new tasks posted on the blackboard
+    // React to new tasks and completed tasks (completed tasks may unblock DAG dependents)
     this.blackboard.on('task:created', () => this.drainPending());
+    this.blackboard.on('task:updated', (task: Task) => {
+      if (task.status === 'completed') this.drainPending();
+    });
   }
 
   /**
@@ -63,15 +66,30 @@ export class AgentRunner {
   }
 
   /**
-   * Spawn agents for as many pending tasks as slots allow (FIFO).
+   * Spawn agents for as many pending tasks as slots allow.
+   * Respects DAG dependencies (blockedBy) and priority ordering.
    */
   drainPending(): void {
     const pending = this.blackboard.getAllTasks()
       .filter(t => t.status === 'pending')
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      .sort((a, b) => {
+        // Higher priority first, then FIFO by creation time
+        const pa = a.priority ?? 0;
+        const pb = b.priority ?? 0;
+        if (pa !== pb) return pb - pa;
+        return a.createdAt.localeCompare(b.createdAt);
+      });
 
     for (const task of pending) {
       if (!this.registry.canSpawn()) break;
+
+      // DAG gate: skip tasks whose blockers haven't completed yet
+      if (task.blockedBy && task.blockedBy.length > 0) {
+        if (!this.blackboard.areBlockersComplete(task.blockedBy)) {
+          continue;
+        }
+      }
+
       this.spawnAgent(task);
     }
   }
@@ -87,14 +105,17 @@ export class AgentRunner {
 
   async spawnAgent(task: Task): Promise<string | null> {
     // Guard: only spawn pending tasks (prevents double-spawn from fast-path + reactive)
-    const current = this.blackboard.getTask(task.id);
-    if (current && current.status !== 'pending') {
-      logger.debug({ taskId: task.id, status: current.status }, 'Task already picked up, skipping');
+    // Atomic check-and-update: UPDATE ... WHERE status = 'pending' ensures no race
+    const claimed = this.blackboard.claimTask(task.id);
+    if (!claimed) {
+      logger.debug({ taskId: task.id }, 'Task already picked up or missing, skipping');
       return null;
     }
 
     if (!this.registry.canSpawn()) {
       logger.warn('Max agents reached, cannot spawn');
+      // Revert claim so the task can be picked up later
+      this.blackboard.updateTask(task.id, { status: 'pending' });
       return null;
     }
 
@@ -133,8 +154,8 @@ export class AgentRunner {
     };
     this.registry.register(agent);
 
-    // Update task status
-    this.blackboard.updateTask(task.id, { status: 'running', agentId: id });
+    // Update task with agent assignment (status already set to 'running' by claimTask)
+    this.blackboard.updateTask(task.id, { agentId: id });
     this.addFeed('agent_spawned', id, `Agent ${id} spawned for: ${task.prompt.slice(0, 100)}`, task.id);
 
     // Setup abort + inactivity check via Blackboard
@@ -174,7 +195,8 @@ export class AgentRunner {
   ): Promise<void> {
     try {
       const effectiveModel = task.model || skill?.model || undefined;
-      const prepared = prepareTaskContext(task, skill);
+      const bbContext = this.buildBlackboardContext(task);
+      const prepared = prepareTaskContext(task, skill, bbContext);
 
       // Throttle Blackboard writes: update lastActivityAt every 5s, progress feed every 30s
       let lastActivityWrite = 0;
@@ -330,8 +352,17 @@ export class AgentRunner {
     });
 
     return new Promise<boolean>((resolve) => {
+      const APPROVAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+      const timer = setTimeout(() => {
+        this.blackboard.removeListener('approval:resolved', onResolved);
+        logger.warn({ approvalId, agentId, taskId }, 'Approval timed out after 30 minutes');
+        resolve(false);
+      }, APPROVAL_TIMEOUT_MS);
+      timer.unref();
+
       const onResolved = (approval: Approval) => {
         if (approval.id === approvalId) {
+          clearTimeout(timer);
           this.blackboard.removeListener('approval:resolved', onResolved);
           resolve(approval.status === 'approved');
         }
@@ -419,6 +450,39 @@ export class AgentRunner {
       return config.auditorOverrides[skill.name];
     }
     return config.auditorMode;
+  }
+
+  /**
+   * Build blackboard context for an agent: blocker results + relevant notes.
+   * This is the "context windowing" — agents get a relevant slice, not everything.
+   */
+  private buildBlackboardContext(task: Task): BlackboardContext | undefined {
+    const ctx: BlackboardContext = {};
+
+    // Include results from completed blocker tasks (DAG predecessors)
+    if (task.blockedBy && task.blockedBy.length > 0) {
+      ctx.blockerResults = [];
+      for (const blockerId of task.blockedBy) {
+        const blocker = this.blackboard.getTask(blockerId);
+        if (blocker?.status === 'completed' && blocker.result) {
+          ctx.blockerResults.push({
+            id: blocker.id,
+            prompt: blocker.prompt,
+            result: blocker.result,
+          });
+        }
+      }
+    }
+
+    // Include notes tagged for this task
+    if (task.id) {
+      const taskNotes = this.blackboard.getTaskNotes(task.id);
+      if (taskNotes.length > 0) {
+        ctx.relevantNotes = taskNotes;
+      }
+    }
+
+    return (ctx.blockerResults?.length || ctx.relevantNotes?.length) ? ctx : undefined;
   }
 
   private addFeed(type: FeedEntry['type'], source: string, content: string, taskId: string | null): void {

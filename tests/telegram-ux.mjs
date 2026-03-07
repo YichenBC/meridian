@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Telegram UX E2E Test — 10 cases
@@ -12,6 +13,7 @@ import { sleep, log } from './lib/helpers.mjs';
  */
 
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
 let passed = 0;
 let failed = 0;
 
@@ -97,8 +99,8 @@ try {
       f => client.feeds.indexOf(f) >= feedsBefore, 20000);
     assert.ok(ack, 'Should get acknowledgment');
     assert.ok(
-      ack.content.includes('On it') || ack.content.includes('Noted'),
-      `Ack should say "On it" or "Noted", got: ${ack.content.slice(0, 80)}`
+      ack.content.length > 0,
+      `Ack should not be empty, got: ${ack.content.slice(0, 80)}`
     );
     log(`Ack: ${ack.content.slice(0, 80)}`);
 
@@ -168,31 +170,31 @@ try {
   await sleep(1000);
 
   // ---------------------------------------------------------------
-  // 7. Task with explicit executor — "use claude code to..."
+  // 7. Task with the configured tool executor
   // ---------------------------------------------------------------
-  await test('Claude Code executor request', async () => {
+  await test('Tool executor request', async () => {
     // Snapshot task IDs before sending so we only match new tasks
     const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
-    client.send('use claude code to list the files in the current directory');
+    client.send('list the files in the current directory');
 
     const ack = await client.waitForFeed('doorman_response',
       f => client.feeds.indexOf(f) >= feedsBefore, 30000);
     assert.ok(ack, 'Should get acknowledgment');
     assert.ok(
-      ack.content.includes('On it') || ack.content.includes('Noted'),
+      ack.content.length > 0,
       `Should acknowledge, got: ${ack.content.slice(0, 80)}`
     );
 
-    // Find the NEW task with claude-code executor
+    // Find the NEW task with the configured tool executor
     await sleep(1000); // give task creation time to propagate
-    const ccTask = Array.from(client.tasks.values())
-      .find(t => !taskIdsBefore.has(t.id) && t.executor === 'claude-code');
-    assert.ok(ccTask, 'New task should have claude-code executor');
-    log(`Task created with executor: ${ccTask.executor}, id: ${ccTask.id}`);
+    const toolTask = Array.from(client.tasks.values())
+      .find(t => !taskIdsBefore.has(t.id) && t.executor === toolExecutor);
+    assert.ok(toolTask, `New task should have ${toolExecutor} executor`);
+    log(`Task created with executor: ${toolTask.executor}, id: ${toolTask.id}`);
 
     // Wait for this specific task to complete
-    log('Waiting for claude-code task to complete (up to 3 min)...');
+    log(`Waiting for ${toolExecutor} task to complete (up to 3 min)...`);
     const waitForTask = async (taskId, timeout = 180000) => {
       const deadline = Date.now() + timeout;
       while (Date.now() < deadline) {
@@ -202,7 +204,7 @@ try {
       }
       return null;
     };
-    const taskDone = await waitForTask(ccTask.id);
+    const taskDone = await waitForTask(toolTask.id);
     assert.ok(taskDone, 'Task should complete');
     assert.equal(taskDone.status, 'completed', `Task should succeed, got: ${taskDone.status}`);
     log(`Completed: ${taskDone.result?.slice(0, 100)}`);

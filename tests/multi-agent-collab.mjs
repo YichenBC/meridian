@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Multi-Agent Collaboration Test — The Ultimate Task
@@ -22,6 +23,7 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const API_BASE = 'http://localhost:3333';
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
 
 async function httpPost(path, body) {
   const resp = await fetch(`${API_BASE}${path}`, {
@@ -171,7 +173,7 @@ try {
   for (const tc of taskConfigs) {
     const { status, data } = await httpPost('/api/tasks', {
       prompt: tc.prompt,
-      executor: 'claude-code',
+      executor: toolExecutor,
       source: 'multi-agent-test',
     });
     assert.equal(status, 201, `Should create task for ${tc.label}`);
@@ -230,7 +232,7 @@ try {
 
   const { status: synthStatus, data: synthData } = await httpPost('/api/tasks', {
     prompt: TASK_E_PROMPT,
-    executor: 'claude-code',
+    executor: toolExecutor,
     source: 'multi-agent-test',
   });
   assert.equal(synthStatus, 201, 'Should create synthesis task');

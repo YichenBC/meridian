@@ -33,8 +33,27 @@ async function runClawhub(args, cwd) {
     cwd,
     env: process.env,
     maxBuffer: 1024 * 1024 * 10,
+    timeout: 45000,
   });
   return `${stdout}${stderr}`;
+}
+
+async function runClawhubWithRetry(args, cwd, retries = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await runClawhub(args, cwd);
+    } catch (err) {
+      lastError = err;
+      const stderr = `${err.stdout || ''}${err.stderr || ''}${err.message || ''}`;
+      if (!/timeout|rate limit exceeded/i.test(stderr) || attempt === retries) {
+        throw err;
+      }
+      log(`clawhub ${args.join(' ')} failed on attempt ${attempt}/${retries}; retrying...`);
+      await sleep(3000 * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function installWithRetry(workdir, retries = 8) {
@@ -66,6 +85,7 @@ async function runMeridianSkillWithRetry(workdir, retries = 6) {
           cwd: workdir,
           env: process.env,
           maxBuffer: 1024 * 1024 * 10,
+          timeout: 180000,
         },
       );
     } catch (err) {
@@ -85,13 +105,13 @@ try {
   log(`=== ClawHub Live Test (${slug}) ===`);
 
   await test('clawhub is authenticated', async () => {
-    const output = await runClawhub(['whoami'], process.cwd());
+    const output = await runClawhubWithRetry(['whoami'], process.cwd());
     assert.ok(output.includes('Checking token') || output.trim().length > 0, 'Expected whoami output');
     assert.ok(!/not logged in|unauthorized|invalid token/i.test(output), `Unexpected whoami output: ${output}`);
   });
 
   await test('clawhub inspect fetches live registry metadata', async () => {
-    const output = await runClawhub(['inspect', slug, '--no-input'], process.cwd());
+    const output = await runClawhubWithRetry(['inspect', slug, '--no-input'], process.cwd());
     assert.ok(new RegExp(`^${slug}\\b`, 'mi').test(output), `Expected slug in inspect output: ${output}`);
     assert.ok(/Summary:|Latest:/i.test(output), `Expected metadata fields in inspect output: ${output}`);
   });

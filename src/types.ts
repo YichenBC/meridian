@@ -2,8 +2,8 @@
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(text: string): Promise<void>;
-  setTyping?(active: boolean): Promise<void>;
+  sendMessage(text: string, targetChannelId?: string): Promise<void>;
+  setTyping?(active: boolean, targetChannelId?: string): Promise<void>;
   isConnected(): boolean;
   disconnect(): Promise<void>;
 }
@@ -34,7 +34,9 @@ export interface Task {
   model?: string;          // model override for this task (e.g. 'haiku', 'opus'), null = use config default
   parentTaskId?: string;   // links to previous task in multi-turn chain
   sessionId?: string;      // claude-code session ID for --resume
-  source?: string;         // who created: 'user', 'agent:<id>', 'scheduler', 'api'
+  source?: string;         // who created: routeable channelId or 'agent:<id>' / 'scheduler' / 'api'
+  blockedBy?: string[];    // task IDs that must complete before this task can run (DAG)
+  priority?: number;       // higher = more important, default 0
   createdAt: string;
   updatedAt: string;
 }

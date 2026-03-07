@@ -269,13 +269,22 @@ fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
   log('=== Skills E2E Test (5 cases) ===');
 
   await test('natural-language skill install resolves from configured extraSkillsDirs', async () => {
+    const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
     client.send('please install the weather skill');
 
     const resp = await client.waitForFeed('doorman_response',
       (feed) => client.feeds.indexOf(feed) >= feedsBefore, 10000);
-    assert.ok(resp.content.includes('Installed skill'), `Unexpected response: ${resp.content}`);
-    assert.ok(resp.content.includes('from extra skills dir'), `Unexpected response: ${resp.content}`);
+    assert.ok(resp.content.includes('Installing skill'), `Unexpected response: ${resp.content}`);
+
+    const installTask = await waitForTaskCompletion(
+      client,
+      (task) => !taskIdsBefore.has(task.id) && task.executor === 'skill-installer',
+      10000,
+    );
+    assert.ok(installTask, 'skill-installer task should complete');
+    assert.equal(installTask.status, 'completed');
+    assert.ok(installTask.result.includes('from extra skills dir'), `Unexpected install result: ${installTask.result}`);
 
     const skillsResp = await httpGet(apiBase, '/api/skills');
     assert.equal(skillsResp.status, 200);
@@ -287,6 +296,7 @@ fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
   });
 
   await test('installed skill is used by end-to-end task routing and execution', async () => {
+    const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
     client.send('check weather in shanghai with the weather skill');
 
@@ -298,18 +308,15 @@ fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
       (feed) => client.feeds.indexOf(feed) >= feedsBefore, 10000);
     assert.ok(spawned, 'should spawn an agent');
 
-    const deadline = Date.now() + 10000;
-    let runningAgent = null;
-    while (Date.now() < deadline) {
-      const task = Array.from(client.tasks.values()).find((entry) =>
-        typeof entry.prompt === 'string' && entry.prompt.includes('weather')
-      );
-      runningAgent = Array.from(client.agents.values()).find((agent) => agent.currentTaskId === task?.id);
-      if (runningAgent) break;
-      await sleep(100);
-    }
-    assert.ok(runningAgent, 'should have a running agent for the weather task');
-    assert.equal(runningAgent.executor, 'codex-cli');
+    const weatherTask = await waitForTaskCompletion(
+      client,
+      (task) =>
+        !taskIdsBefore.has(task.id)
+        && typeof task.prompt === 'string'
+        && task.prompt.includes('weather'),
+      10000,
+    );
+    assert.ok(weatherTask, 'should create and complete a weather task');
 
     const result = await client.waitForFeed('agent_result',
       (feed) => client.feeds.indexOf(feed) >= feedsBefore, 10000);
@@ -317,13 +324,23 @@ fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
   });
 
   await test('natural-language install accepts an absolute skill path', async () => {
+    const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
     client.send(`please install skill "${localPathSkillDir}"`);
 
     const resp = await client.waitForFeed('doorman_response',
       (feed) => client.feeds.indexOf(feed) >= feedsBefore, 10000);
-    assert.ok(resp.content.includes('path-skill'), `Unexpected response: ${resp.content}`);
-    assert.ok(resp.content.includes('from local path'), `Unexpected response: ${resp.content}`);
+    assert.ok(resp.content.includes('Installing skill'), `Unexpected response: ${resp.content}`);
+
+    const installTask = await waitForTaskCompletion(
+      client,
+      (task) => !taskIdsBefore.has(task.id) && task.executor === 'skill-installer',
+      10000,
+    );
+    assert.ok(installTask, 'path install task should complete');
+    assert.equal(installTask.status, 'completed');
+    assert.ok(installTask.result.includes('path-skill'), `Unexpected install result: ${installTask.result}`);
+    assert.ok(installTask.result.includes('from local path'), `Unexpected install result: ${installTask.result}`);
 
     const skillsResp = await httpGet(apiBase, '/api/skills');
     const installed = skillsResp.data.find((skill) => skill.name === 'path-skill');
@@ -333,13 +350,23 @@ fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
   });
 
   await test('natural-language install falls back to the clawhub CLI when needed', async () => {
+    const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
     client.send('please install the remote-skill skill');
 
     const resp = await client.waitForFeed('doorman_response',
       (feed) => client.feeds.indexOf(feed) >= feedsBefore, 10000);
-    assert.ok(resp.content.includes('remote-skill'), `Unexpected response: ${resp.content}`);
-    assert.ok(resp.content.includes('from ClawHub'), `Unexpected response: ${resp.content}`);
+    assert.ok(resp.content.includes('Installing skill'), `Unexpected response: ${resp.content}`);
+
+    const installTask = await waitForTaskCompletion(
+      client,
+      (task) => !taskIdsBefore.has(task.id) && task.executor === 'skill-installer',
+      10000,
+    );
+    assert.ok(installTask, 'remote install task should complete');
+    assert.equal(installTask.status, 'completed');
+    assert.ok(installTask.result.includes('remote-skill'), `Unexpected install result: ${installTask.result}`);
+    assert.ok(installTask.result.includes('from ClawHub'), `Unexpected install result: ${installTask.result}`);
 
     const skillsResp = await httpGet(apiBase, '/api/skills');
     const installed = skillsResp.data.find((skill) => skill.name === 'remote-skill');

@@ -10,7 +10,7 @@ You are an agent within the Meridian multi-agent system. You have access to the 
 
 ## Blackboard Database
 
-Location: `data/meridian.db` (SQLite, WAL mode)
+Location: `data/<channel>.db` (for example `data/cli.db`, `data/telegram.db`, `data/feishu.db`; SQLite, WAL mode)
 
 Tables:
 - `tasks` — id, prompt, role, status, agentId, result, error, executor, model, parentTaskId, sessionId, source, createdAt, updatedAt

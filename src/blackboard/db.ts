@@ -78,6 +78,10 @@ function createSchema(): void {
 
   // Migration: add persistent to agents
   try { db.exec(`ALTER TABLE agents ADD COLUMN persistent INTEGER DEFAULT 0`); } catch { /* already exists */ }
+
+  // Migration: add blockedBy (JSON array) and priority to tasks
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN blockedBy TEXT`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 0`); } catch { /* already exists */ }
 }
 
 export function initDatabase(dbPath: string): void {
@@ -91,27 +95,57 @@ export function initDatabase(dbPath: string): void {
 
 export function createTask(task: Task): void {
   const stmt = db.prepare(`
-    INSERT INTO tasks (id, prompt, role, status, agentId, result, error, createdAt, updatedAt, parentTaskId, sessionId, executor, model, source)
-    VALUES (@id, @prompt, @role, @status, @agentId, @result, @error, @createdAt, @updatedAt, @parentTaskId, @sessionId, @executor, @model, @source)
+    INSERT INTO tasks (id, prompt, role, status, agentId, result, error, createdAt, updatedAt, parentTaskId, sessionId, executor, model, source, blockedBy, priority)
+    VALUES (@id, @prompt, @role, @status, @agentId, @result, @error, @createdAt, @updatedAt, @parentTaskId, @sessionId, @executor, @model, @source, @blockedBy, @priority)
   `);
-  stmt.run({ parentTaskId: null, sessionId: null, executor: null, model: null, source: null, ...task });
+  stmt.run({
+    parentTaskId: null, sessionId: null, executor: null, model: null, source: null, priority: 0,
+    ...task,
+    blockedBy: task.blockedBy ? JSON.stringify(task.blockedBy) : null,
+  });
+}
+
+function hydrateTask(row: any): Task {
+  if (row && typeof row.blockedBy === 'string') {
+    try { row.blockedBy = JSON.parse(row.blockedBy); } catch { row.blockedBy = undefined; }
+  } else if (row) {
+    row.blockedBy = row.blockedBy || undefined;
+  }
+  return row as Task;
 }
 
 export function getTask(id: string): Task | undefined {
   const stmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
-  return stmt.get(id) as Task | undefined;
+  const row = stmt.get(id);
+  return row ? hydrateTask(row) : undefined;
 }
 
 export function getAllTasks(): Task[] {
   const stmt = db.prepare('SELECT * FROM tasks ORDER BY createdAt DESC');
-  return stmt.all() as Task[];
+  return (stmt.all() as any[]).map(hydrateTask);
+}
+
+/**
+ * Atomically claim a pending task by setting status to 'running'.
+ * Returns true if the task was pending and is now claimed, false otherwise.
+ */
+export function claimTask(id: string): boolean {
+  const stmt = db.prepare("UPDATE tasks SET status = 'running', updatedAt = ? WHERE id = ? AND status = 'pending'");
+  const result = stmt.run(new Date().toISOString(), id);
+  return result.changes > 0;
 }
 
 export function updateTask(id: string, updates: Partial<Task>): void {
   const current = getTask(id);
   if (!current) return;
 
-  const merged = { parentTaskId: null, sessionId: null, executor: null, model: null, source: null, ...current, ...updates, id };
+  const merged = {
+    parentTaskId: null, sessionId: null, executor: null, model: null, source: null, priority: 0,
+    ...current, ...updates, id,
+    blockedBy: (updates.blockedBy !== undefined ? updates.blockedBy : current.blockedBy)
+      ? JSON.stringify(updates.blockedBy !== undefined ? updates.blockedBy : current.blockedBy)
+      : null,
+  };
   const stmt = db.prepare(`
     UPDATE tasks SET
       prompt = @prompt,
@@ -126,7 +160,9 @@ export function updateTask(id: string, updates: Partial<Task>): void {
       sessionId = @sessionId,
       executor = @executor,
       model = @model,
-      source = @source
+      source = @source,
+      blockedBy = @blockedBy,
+      priority = @priority
     WHERE id = @id
   `);
   stmt.run(merged);
@@ -202,6 +238,33 @@ export function getFeedsByTask(taskId: string, type?: string, limit: number = 20
   return stmt.all(taskId, limit) as FeedEntry[];
 }
 
+/**
+ * Delete old feed entries, keeping only the most recent `keepCount`.
+ * Returns the number of deleted rows.
+ */
+export function rotateFeeds(keepCount: number = 5000): number {
+  const stmt = db.prepare(`
+    DELETE FROM feeds WHERE id NOT IN (
+      SELECT id FROM feeds ORDER BY timestamp DESC LIMIT ?
+    )
+  `);
+  const result = stmt.run(keepCount);
+  return result.changes;
+}
+
+/**
+ * Check whether all blockers for a task are completed.
+ */
+export function areBlockersComplete(blockedBy: string[]): boolean {
+  if (blockedBy.length === 0) return true;
+  const placeholders = blockedBy.map(() => '?').join(',');
+  const stmt = db.prepare(
+    `SELECT COUNT(*) as cnt FROM tasks WHERE id IN (${placeholders}) AND status = 'completed'`
+  );
+  const row = stmt.get(...blockedBy) as { cnt: number };
+  return row.cnt === blockedBy.length;
+}
+
 // --- Approvals ---
 
 export function createApproval(approval: Approval): void {
@@ -249,7 +312,13 @@ export function getNotes(limit: number = 50): Note[] {
   return stmt.all(limit) as Note[];
 }
 
+export function getNotesByTask(taskId: string): Note[] {
+  const stmt = db.prepare('SELECT * FROM notes WHERE taskId = ? ORDER BY createdAt DESC');
+  return stmt.all(taskId) as Note[];
+}
+
 export function getNotesByTag(tag: string): Note[] {
-  const stmt = db.prepare("SELECT * FROM notes WHERE tags LIKE ? ORDER BY createdAt DESC");
-  return stmt.all(`%${tag}%`) as Note[];
+  const escaped = tag.replace(/[%_]/g, '\\$&');
+  const stmt = db.prepare("SELECT * FROM notes WHERE tags LIKE ? ESCAPE '\\' ORDER BY createdAt DESC");
+  return stmt.all(`%${escaped}%`) as Note[];
 }

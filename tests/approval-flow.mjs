@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Approval Flow E2E Test — 3 cases
@@ -22,6 +23,7 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const API_BASE = 'http://localhost:3333';
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
 let passed = 0;
 let failed = 0;
 
@@ -77,7 +79,7 @@ try {
     // Even if mode is passthrough, we test the HTTP approval endpoint directly
     const { status: createStatus, data: createData } = await httpPost('/api/tasks', {
       prompt: 'list the files in the current directory',
-      executor: 'claude-code',
+      executor: toolExecutor,
       source: 'approval-test',
     });
     assert.equal(createStatus, 201);

@@ -24,6 +24,8 @@ export interface ExecuteSkillInstallCommandParams {
   clawhubPath?: string;
 }
 
+const SKILL_INSTALL_TASK_PREFIX = '__MERIDIAN_INSTALL_SKILL__';
+
 export function parseSkillInstallIntent(input: string): SkillInstallCommand | null {
   const trimmed = input.trim();
 
@@ -37,11 +39,27 @@ export function parseSkillInstallIntent(input: string): SkillInstallCommand | nu
   for (const pattern of candidatePatterns) {
     const match = trimmed.match(pattern);
     const reference = firstNonEmpty(match?.[1], match?.[2], match?.[3]);
-    if (reference) {
+    if (reference && !/^(a|an|the)$/i.test(reference)) {
       return { reference: stripWrappingQuotes(reference) };
     }
   }
 
+  return null;
+}
+
+export function buildSkillInstallTaskPrompt(reference: string): string {
+  return `${SKILL_INSTALL_TASK_PREFIX} ${JSON.stringify({ reference })}`;
+}
+
+export function parseSkillInstallTaskPrompt(prompt: string): SkillInstallCommand | null {
+  if (!prompt.startsWith(SKILL_INSTALL_TASK_PREFIX)) return null;
+  const payload = prompt.slice(SKILL_INSTALL_TASK_PREFIX.length).trim();
+  try {
+    const parsed = JSON.parse(payload);
+    if (parsed && typeof parsed.reference === 'string' && parsed.reference.trim().length > 0) {
+      return { reference: parsed.reference.trim() };
+    }
+  } catch {}
   return null;
 }
 
@@ -146,6 +164,18 @@ function buildInstallMetadata(source: SkillInstallMetadata['source']): SkillInst
     installedAt: new Date().toISOString(),
     source,
   };
+}
+
+export function formatInstalledSkillSummary(installed: InstalledSkillRecord[]): string {
+  return installed
+    .map((skill) => {
+      const source = skill.installMetadata?.source;
+      if (!source) return skill.name;
+      if (source.kind === 'clawhub') return `${skill.name} (from ClawHub${source.slug ? `: ${source.slug}` : ''})`;
+      if (source.kind === 'extra-skills-dir') return `${skill.name} (from extra skills dir)`;
+      return `${skill.name} (from local path)`;
+    })
+    .join(', ');
 }
 
 function stripWrappingQuotes(value: string): string {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { MeridianTestClient } from './lib/client.mjs';
 import { sleep, log } from './lib/helpers.mjs';
+import { getRuntimeConfig } from './lib/runtime.mjs';
 
 /**
  * Unified UX E2E Test — 14 cases
@@ -12,13 +13,13 @@ import { sleep, log } from './lib/helpers.mjs';
  * 4. Status (idle) → clear status
  * 5. Status (busy) → shows running tasks
  * 6. Stop (nothing running) → friendly "nothing to stop"
- * 7. Claude Code executor → task with executor=claude-code
+ * 7. Tool executor routing → task with executor matching config
  * 8. No duplicate messages
  * 9. Rapid-fire tasks → both picked up
  * 10. HTTP API: POST /api/tasks → task created on blackboard
  * 11. HTTP API: POST /api/notes → note created, no agent spawn
  * 12. Short/ambiguous message → graceful handling
- * 13. Skill install request → routes to claude-code, creates skill
+ * 13. Skill install request → routes to skill-installer, creates skill
  * 14. Skill-aware routing → task matching installed skill uses correct executor
  *
  * Requires: Meridian running (npm start)
@@ -26,6 +27,7 @@ import { sleep, log } from './lib/helpers.mjs';
 
 const API_BASE = 'http://localhost:3333';
 const client = new MeridianTestClient();
+const { toolExecutor } = getRuntimeConfig();
 let passed = 0;
 let failed = 0;
 
@@ -181,21 +183,21 @@ try {
 
   await sleep(1000);
 
-  // 7. Claude Code executor
-  await test('Claude Code executor request', async () => {
+  // 7. Tool executor routing
+  await test('Tool executor request', async () => {
     const taskIdsBefore = new Set(client.tasks.keys());
     const feedsBefore = client.feeds.length;
-    client.send('use claude code to list the files in the current directory');
+    client.send('list the files in the current directory');
 
     const ack = await client.waitForFeed('doorman_response',
       f => client.feeds.indexOf(f) >= feedsBefore, 30000);
     assert.ok(ack, 'Should get acknowledgment');
 
     await sleep(1000);
-    const ccTask = Array.from(client.tasks.values())
-      .find(t => !taskIdsBefore.has(t.id) && t.executor === 'claude-code');
-    assert.ok(ccTask, 'New task should have claude-code executor');
-    log(`Task created with executor: ${ccTask.executor}, id: ${ccTask.id}`);
+    const toolTask = Array.from(client.tasks.values())
+      .find(t => !taskIdsBefore.has(t.id) && t.executor === toolExecutor);
+    assert.ok(toolTask, `New task should have ${toolExecutor} executor`);
+    log(`Task created with executor: ${toolTask.executor}, id: ${toolTask.id}`);
 
     const waitForTask = async (taskId, timeout = 180000) => {
       const deadline = Date.now() + timeout;
@@ -206,7 +208,7 @@ try {
       }
       return null;
     };
-    const taskDone = await waitForTask(ccTask.id);
+    const taskDone = await waitForTask(toolTask.id);
     assert.ok(taskDone, 'Task should complete');
     assert.equal(taskDone.status, 'completed', `Task should succeed, got: ${taskDone.status}`);
     log(`Completed: ${taskDone.result?.slice(0, 100)}`);
@@ -343,13 +345,13 @@ try {
 
   // 12. Skill install request (slow — skip with SKIP_SLOW=1)
   if (process.env.SKIP_SLOW) {
-    log('\n--- Test: Skill install routes to claude-code executor --- SKIPPED');
+    log('\n--- Test: Skill install routes to skill-installer executor --- SKIPPED');
     passed++;
   } else {
-    await test('Skill install routes to claude-code executor', async () => {
+    await test('Skill install routes to skill-installer executor', async () => {
       const taskIdsBefore = new Set(client.tasks.keys());
       const feedsBefore = client.feeds.length;
-      client.send('install a skill for generating QR codes');
+      client.send('install the qr-code skill');
 
       const ack = await client.waitForFeed('doorman_response',
         f => client.feeds.indexOf(f) >= feedsBefore, 30000);
@@ -364,8 +366,8 @@ try {
       const installTask = Array.from(client.tasks.values())
         .find(t => !taskIdsBefore.has(t.id) && t.prompt?.toLowerCase().includes('qr'));
       assert.ok(installTask, 'Should create a task for skill install');
-      assert.equal(installTask.executor, 'claude-code',
-        `Skill install should use claude-code executor, got: ${installTask.executor}`);
+      assert.equal(installTask.executor, 'skill-installer',
+        `Skill install should use skill-installer executor, got: ${installTask.executor}`);
       log(`Task executor: ${installTask.executor}, id: ${installTask.id}`);
 
       const deadline = Date.now() + 180000;
@@ -403,8 +405,8 @@ try {
       const browserTask = Array.from(client.tasks.values())
         .find(t => t.prompt?.includes('google.com') || t.prompt?.includes('screenshot'));
       assert.ok(browserTask, 'Should create a browser task');
-      assert.equal(browserTask.executor, 'claude-code',
-        `Browser task should use claude-code (has playwright MCP), got: ${browserTask.executor}`);
+      assert.equal(browserTask.executor, toolExecutor,
+        `Browser task should use ${toolExecutor}, got: ${browserTask.executor}`);
       log(`Browser task executor: ${browserTask.executor}`);
 
       const waitDeadline = Date.now() + 120000;

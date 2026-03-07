@@ -72,17 +72,21 @@ export class TelegramChannel implements Channel {
     this.bot.start({ drop_pending_updates: true });
   }
 
-  async setTyping(active: boolean): Promise<void> {
-    if (!this.bot || !this.chatId || !active) return;
+  async setTyping(active: boolean, targetChannelId?: string): Promise<void> {
+    if (!this.bot || !active) return;
+    const chatId = this.resolveTargetChatId(targetChannelId);
+    if (!chatId) return;
     try {
-      await this.bot.api.sendChatAction(this.chatId, 'typing');
+      await this.bot.api.sendChatAction(chatId, 'typing');
     } catch {
       // Typing indicator is best-effort
     }
   }
 
-  async sendMessage(text: string): Promise<void> {
-    if (!this.bot || !this.chatId) return;
+  async sendMessage(text: string, targetChannelId?: string): Promise<void> {
+    if (!this.bot) return;
+    const chatId = this.resolveTargetChatId(targetChannelId);
+    if (!chatId) return;
 
     try {
       const html = markdownToTelegramHtml(text);
@@ -91,16 +95,16 @@ export class TelegramChannel implements Channel {
 
       for (const chunk of chunks) {
         try {
-          await this.bot.api.sendMessage(this.chatId, chunk, { parse_mode: 'HTML' });
-          logger.info({ chatId: this.chatId, length: chunk.length }, 'Telegram message sent');
+          await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+          logger.info({ chatId, length: chunk.length }, 'Telegram message sent');
         } catch {
           // Fallback: send as plain text if HTML parsing fails
-          await this.bot.api.sendMessage(this.chatId, stripHtml(chunk));
-          logger.info({ chatId: this.chatId, length: stripHtml(chunk).length }, 'Telegram message sent (plain text fallback)');
+          await this.bot.api.sendMessage(chatId, stripHtml(chunk));
+          logger.info({ chatId, length: stripHtml(chunk).length }, 'Telegram message sent (plain text fallback)');
         }
       }
     } catch (err) {
-      logger.error({ chatId: this.chatId, err }, 'Failed to send Telegram message');
+      logger.error({ chatId, err }, 'Failed to send Telegram message');
     }
   }
 
@@ -114,6 +118,12 @@ export class TelegramChannel implements Channel {
       this.bot = null;
       logger.info('Telegram bot stopped');
     }
+  }
+
+  private resolveTargetChatId(targetChannelId?: string): string | null {
+    if (!targetChannelId) return this.chatId;
+    if (!targetChannelId.startsWith('tg:')) return null;
+    return targetChannelId.slice(3);
   }
 }
 
