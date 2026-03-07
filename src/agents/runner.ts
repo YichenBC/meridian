@@ -18,6 +18,8 @@ interface RunningAgent {
   startedAt: number;
   outputBytes: number;
   lastProgressText: string;
+  lastOutputAt: number;       // last time output was received
+  stallWarned: boolean;       // whether we've already warned about stalling
 }
 
 export class AgentRunner {
@@ -158,21 +160,45 @@ export class AgentRunner {
     this.blackboard.updateTask(task.id, { agentId: id });
     this.addFeed('agent_spawned', id, `Agent ${id} spawned for: ${task.prompt.slice(0, 100)}`, task.id);
 
-    // Setup abort + inactivity check via Blackboard
+    // Setup abort + graduated inactivity detection
     const abort = new AbortController();
+    const spawnedAt = Date.now();
+    const STALL_THRESHOLD_MS = Math.min(config.agentTimeoutMs / 3, 5 * 60 * 1000); // 1/3 of timeout or 5min, whichever is less
+
+    const runningAgent: RunningAgent = {
+      abort, timeout: null as any, promise: null!,
+      startedAt: spawnedAt, outputBytes: 0, lastProgressText: '',
+      lastOutputAt: spawnedAt, stallWarned: false,
+    };
+
     const timeout = setInterval(() => {
       const agentRecord = this.blackboard.getAgent(id);
       if (!agentRecord) { clearInterval(timeout); return; }
+
+      const elapsed = Date.now() - runningAgent.startedAt;
+      const silentFor = Date.now() - runningAgent.lastOutputAt;
+
+      // Hard timeout: no activity for the full timeout period → kill
       const lastAt = new Date(agentRecord.lastActivityAt).getTime();
       if (Date.now() - lastAt > config.agentTimeoutMs) {
-        logger.warn({ id, lastActivityAt: agentRecord.lastActivityAt }, 'Agent timed out (no Blackboard activity)');
+        logger.warn({ id, elapsed: Math.round(elapsed / 1000), silentFor: Math.round(silentFor / 1000) },
+          'Agent timed out — no activity');
         abort.abort();
         clearInterval(timeout);
+        return;
+      }
+
+      // Stall warning: no output for a while but not yet timed out
+      if (silentFor > STALL_THRESHOLD_MS && !runningAgent.stallWarned) {
+        runningAgent.stallWarned = true;
+        logger.warn({ id, silentForSec: Math.round(silentFor / 1000), outputBytes: runningAgent.outputBytes },
+          'Agent may be stalled — no output received');
+        this.addFeed('system', id,
+          `Agent ${id} has been silent for ${Math.round(silentFor / 60000)}min (${runningAgent.outputBytes}B output so far)`,
+          task.id);
       }
     }, 10000);
-
-    // Run executor — tracked promise (not fire-and-forget)
-    const runningAgent: RunningAgent = { abort, timeout, promise: null!, startedAt: Date.now(), outputBytes: 0, lastProgressText: '' };
+    runningAgent.timeout = timeout;
     const promise = this.runExecutor(id, task, skill, executor, abort, timeout, runningAgent);
     runningAgent.promise = promise;
     this.running.set(id, runningAgent);
@@ -213,6 +239,8 @@ export class AgentRunner {
 
           if (chunk.length > 0) {
             runningAgent.outputBytes += chunk.length;
+            runningAgent.lastOutputAt = now;
+            runningAgent.stallWarned = false; // reset stall warning on new output
             progressBuffer += chunk;
           }
 
