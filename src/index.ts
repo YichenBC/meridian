@@ -119,6 +119,15 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
+  // Catch uncaught errors to log them before crashing
+  process.on('uncaughtException', (err) => {
+    logger.fatal({ err }, 'Uncaught exception');
+    shutdown().catch(() => process.exit(1));
+  });
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ reason }, 'Unhandled rejection');
+  });
+
   logger.info({ port: config.port, model: config.model }, 'Meridian is ready');
 }
 
