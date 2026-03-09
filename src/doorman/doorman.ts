@@ -25,6 +25,22 @@ const KILL_ALL_PATTERNS = /^(stop|cancel|kill|abort|quit)\s*(all|everything|agen
 const APPROVAL_POSITIVE = /\b(approve|yes|accept|confirm|ok|okay|go ahead|do it)\b/i;
 const APPROVAL_NEGATIVE = /\b(reject|no|deny|decline|don't|cancel)\b/i;
 
+// --- Fast-path task detection: skip LLM triage for obvious work requests ---
+// These patterns indicate the user clearly wants work done, not a conversation.
+// Matches imperative verbs at the start, or explicit work phrases anywhere.
+const FAST_TASK_PATTERNS = [
+  /^(write|create|build|generate|implement|code|develop|make)\s+/i,       // "write a function...", "create a script..."
+  /^(research|investigate|analyze|compare|find out|look up|look into)\s+/i, // "research the top...", "analyze this..."
+  /^(fix|debug|solve|resolve|patch|repair)\s+/i,                          // "fix this bug...", "debug the error..."
+  /^(refactor|optimize|improve|clean up|rewrite)\s+/i,                    // "refactor the module..."
+  /^(test|run|execute|deploy|install|setup|configure)\s+/i,               // "test the API...", "run the migration..."
+  /^(read|open|check|browse|fetch|scrape|download)\s+(the |my |this |a |https?:)/i,  // "read my package.json", "browse https://..."
+  /^(summarize|translate|convert|format|parse|transform)\s+/i,            // "summarize this error...", "convert CSV to JSON..."
+  /^(draft|compose|prepare|outline)\s+/i,                                 // "draft a Slack message...", "compose an email..."
+  /^(list|show me|give me|get|pull)\s+(the |all |my |recent |\d)/i,       // "list all files...", "show me the logs..."
+  /^(go to|navigate to|visit)\s+https?:/i,                                // "go to https://..."
+];
+
 /**
  * The Doorman is a persistent CLI session.
  *
@@ -147,6 +163,15 @@ export class Doorman {
     if (installIntent) {
       await this.createTask(buildSkillInstallTaskPrompt(installIntent.reference), 'skill-installer', undefined, msg.channelId);
       await this.respond(`Installing skill "${installIntent.reference}".`, msg.channelId);
+      return;
+    }
+
+    // --- Fast-path task routing: skip LLM triage for obvious work requests ---
+    if (FAST_TASK_PATTERNS.some(p => p.test(trimmed))) {
+      logger.info({ msg: trimmed.slice(0, 80) }, 'Fast-path: routing as task (skipping triage)');
+      const needsTools = this.messageNeedsTools(trimmed);
+      await this.createTask(trimmed, needsTools ? this.toolExecutor : undefined, undefined, msg.channelId);
+      await this.respond("On it.", msg.channelId);
       return;
     }
 
@@ -455,6 +480,15 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     }
 
     return { response: "Hey! What can I help you with?" };
+  }
+
+  /**
+   * Determine if a fast-path task needs tool access (file I/O, shell, browser)
+   * vs pure text generation (writing, creative work, knowledge).
+   */
+  private messageNeedsTools(content: string): boolean {
+    const toolPatterns = /\b(read|open|check|browse|fetch|scrape|download|file|directory|folder|logs?|database|deploy|install|setup|configure|run |execute|test |debug|fix|server|endpoint|api |url|https?:|package\.json|\.ts|\.js|\.py|\.md)\b/i;
+    return toolPatterns.test(content);
   }
 
   private messageNeedsAction(content: string, needsActionPattern: RegExp): boolean {

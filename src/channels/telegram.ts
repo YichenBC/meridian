@@ -1,5 +1,6 @@
 import { Bot } from 'grammy';
 import crypto from 'crypto';
+import net from 'net';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { Channel, OnInboundMessage, UserMessage } from '../types.js';
 import { logger } from '../logger.js';
@@ -21,8 +22,9 @@ export class TelegramChannel implements Channel {
   }
 
   async connect(): Promise<void> {
-    const botConfig = this.proxy
-      ? { client: { baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy), compress: true } } }
+    const effectiveProxy = await this.resolveProxy();
+    const botConfig = effectiveProxy
+      ? { client: { baseFetchConfig: { agent: new HttpsProxyAgent(effectiveProxy), compress: true } } }
       : undefined;
     this.bot = new Bot(this.botToken, botConfig);
 
@@ -125,6 +127,40 @@ export class TelegramChannel implements Channel {
     if (!targetChannelId.startsWith('tg:')) return null;
     return targetChannelId.slice(3);
   }
+
+  private async resolveProxy(): Promise<string | null> {
+    if (!this.proxy) return null;
+    const reachable = await isProxyReachable(this.proxy);
+    if (reachable) return this.proxy;
+    logger.warn({ proxy: this.proxy }, 'Telegram proxy is unreachable; falling back to direct/default network path');
+    return null;
+  }
+}
+
+async function isProxyReachable(proxyUrl: string): Promise<boolean> {
+  let parsed: URL;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch {
+    return false;
+  }
+
+  const hostname = parsed.hostname;
+  const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
+  if (!hostname || !Number.isFinite(port) || port <= 0) {
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: hostname, port, timeout: 1500 });
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
 }
 
 /**
