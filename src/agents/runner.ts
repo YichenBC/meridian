@@ -615,9 +615,9 @@ export class AgentRunner {
       }
     }
 
-    // Inject domain-specific system prompt for knowledge tasks
+    // Inject knowledge assistant system prompt for knowledge and research tasks
     const { domain } = classifyDomain(task.prompt);
-    if (domain === 'knowledge') {
+    if (domain === 'knowledge' || domain === 'research') {
       const knowledgePromptPath = path.join(config.skillsDir, 'knowledge-system', 'SYSTEM.md');
       try {
         if (fs.existsSync(knowledgePromptPath)) {
