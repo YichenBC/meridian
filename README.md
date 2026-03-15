@@ -150,14 +150,44 @@ node --test tests/media-support.mjs            # Media attachment tests
 
 ## Roadmap
 
-- [ ] **Session management** — persistent Claude Code sessions across tasks, warm agent pool to reduce cold start
-- [ ] **Agent memory** — cross-session memory so agents remember prior work and user preferences
-- [ ] **Agent IDE state** — agents maintain working context (open files, project understanding) across tasks
-- [ ] **Smarter skill routing** — Doorman-level skill pre-selection to avoid injecting full catalog into every prompt
-- [ ] **Streaming results to Telegram** — progressive updates instead of waiting for full completion
-- [ ] **Multi-vault support** — route knowledge to different Obsidian vaults by topic
-- [ ] **Voice messages** — transcribe Telegram/Feishu voice messages and process as text
-- [ ] **Approval UX** — rich approval cards in Telegram with inline buttons
+### Phase 1: Harden the Core *(in progress)*
+- [x] Constitutional permission system (passthrough/constitutional/supervised)
+- [x] Feishu channel with typing indicator
+- [x] Instance-per-channel architecture (separate process + DB per channel)
+- [x] Knowledge assistant skills (ingest, query, daily-brief, idea-generator)
+- [x] Media attachment pipeline (photos, PDFs, documents via Telegram/Feishu)
+- [x] OpenClaw-style LLM skill selection
+- [ ] Token-aware context management (replace feed-count with token counting)
+- [ ] Session management — persistent Claude Code sessions, warm agent pool
+
+### Phase 2: MCP Client
+- [ ] Implement MCP client so Meridian can call any MCP server as a tool
+- [ ] Streamable HTTP transport (not legacy stdio/SSE)
+- [ ] OpenClaw and NanoClaw tools become consumable through MCP
+
+### Phase 3: Planner/Worker/Judge
+- [ ] **Planner agent** — decomposes tasks into a DAG (extends existing `blockedBy` system)
+- [ ] **Judge agent** — validates results before posting to blackboard (prevents sycophancy)
+- [ ] Coordination skills: research synthesis, code review pipeline, competing hypotheses
+
+### Phase 4: A2A Integration
+- [ ] Publish `/.well-known/agent-card.json` (discoverable agents)
+- [ ] A2A client for delegating to external agents
+- [ ] OpenClaw agents, NanoClaw containers, any A2A agent become "workers"
+
+### Phase 5: Toward ClawOS
+- [ ] Universal integration engine (vibe-coding + browser automation + API)
+- [ ] Proactive intelligence (pattern recognition, prediction, auto-research)
+- [ ] Personal knowledge graph (cross-service connections, lifelong learning)
+- [ ] Consumer polish (one-click setup, beautiful UI, works out of the box)
+
+### Protocol Priority
+
+| Protocol | Status | Action |
+|----------|--------|--------|
+| **MCP** | 97M+ downloads, Linux Foundation | **Now** |
+| **A2A** | 150+ partners, Linux Foundation | **Within 6 months** |
+| **AG-UI** | Adopted by MS, CopilotKit | Replace custom WebSocket |
 
 ## License
 
