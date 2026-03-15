@@ -315,13 +315,20 @@ export class TelegramChannel implements Channel {
     const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
     logger.info({ url: url.replace(this.botToken, '***'), fileId }, 'Downloading Telegram file');
 
-    // Use proxy for file download if configured (same as bot API calls)
-    const fetchOptions: RequestInit = {};
+    // Try with proxy first, fall back to direct (bypassing global proxy dispatcher)
+    let response: Response;
+    const undici = await import('undici');
     if (this.proxy) {
-      (fetchOptions as any).dispatcher = new (await import('undici')).ProxyAgent(this.proxy);
+      try {
+        response = await fetch(url, { dispatcher: new undici.ProxyAgent(this.proxy) } as any);
+      } catch {
+        logger.info({ fileId }, 'Proxy unavailable for file download, trying direct');
+        // Use undici.fetch with a fresh Agent to bypass setGlobalDispatcher
+        response = await (undici.fetch as typeof fetch)(url, { dispatcher: new undici.Agent() } as any);
+      }
+    } else {
+      response = await fetch(url);
     }
-
-    const response = await fetch(url, fetchOptions);
     if (!response.ok) throw new Error(`Download failed: ${response.status}`);
 
     const buffer = Buffer.from(await response.arrayBuffer());
