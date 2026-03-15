@@ -128,4 +128,36 @@ describe('Context windowing', () => {
     const prepared = prepareTaskContext(makeTask({ prompt: 'simple' }), null, {});
     assert.equal(prepared.toolPrompt, 'simple');
   });
+
+  it('includes session memory in tool prompt', () => {
+    const bbContext = {
+      sessionMemory: '# Session abc123\n\n## Domain: knowledge\n\n## Task History\n### 2026-03-15 06:00 — Daily research\nScanned 4 articles.',
+    };
+    const prepared = prepareTaskContext(makeTask({ prompt: 'ingest new paper' }), null, bbContext);
+    assert.ok(prepared.toolPrompt.includes('Session Memory'));
+    assert.ok(prepared.toolPrompt.includes('Daily research'));
+    assert.ok(prepared.toolPrompt.includes('ingest new paper'));
+  });
+
+  it('truncates long session memory', () => {
+    const longMemory = 'x'.repeat(3000);
+    const bbContext = { sessionMemory: longMemory };
+    const prepared = prepareTaskContext(makeTask({ prompt: 'task' }), null, bbContext);
+    assert.ok(prepared.toolPrompt.includes('Session Memory'));
+    assert.ok(prepared.toolPrompt.includes('(truncated)'));
+    assert.ok(!prepared.toolPrompt.includes(longMemory));
+  });
+
+  it('includes session memory alongside blockers and notes', () => {
+    const bbContext = {
+      blockerResults: [{ id: 'r1', prompt: 'step 1', result: 'done' }],
+      relevantNotes: [{ id: 'n1', source: 'user', title: 'Note', content: 'hint', createdAt: new Date().toISOString() }],
+      sessionMemory: '## Domain: coding\nFixed 3 bugs previously.',
+    };
+    const prepared = prepareTaskContext(makeTask({ prompt: 'next step' }), null, bbContext);
+    assert.ok(prepared.toolPrompt.includes('Predecessor Task Results'));
+    assert.ok(prepared.toolPrompt.includes('Blackboard Notes'));
+    assert.ok(prepared.toolPrompt.includes('Session Memory'));
+    assert.ok(prepared.toolPrompt.includes('Fixed 3 bugs'));
+  });
 });

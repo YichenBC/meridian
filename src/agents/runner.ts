@@ -490,6 +490,12 @@ export class AgentRunner {
     this.running.delete(id);
 
     const agent = this.registry.get(id);
+
+    // Kill process group if PID available (catches subprocesses)
+    if (agent?.pid) {
+      try { process.kill(-agent.pid, 'SIGTERM'); } catch {}
+    }
+
     if (agent?.currentTaskId) {
       this.blackboard.updateTask(agent.currentTaskId, { status: 'cancelled' });
     }
@@ -591,7 +597,21 @@ export class AgentRunner {
       }
     }
 
-    return (ctx.blockerResults?.length || ctx.relevantNotes?.length) ? ctx : undefined;
+    // Include session memory if this task is reusing a pooled session
+    if (task.sessionId) {
+      const poolSession = this.blackboard.getSessionBySessionId(task.sessionId);
+      if (poolSession) {
+        const sessionDir = path.join(config.dataDir, 'sessions', task.sessionId.slice(0, 16));
+        const memoryPath = path.join(sessionDir, 'MEMORY.md');
+        try {
+          if (fs.existsSync(memoryPath)) {
+            ctx.sessionMemory = fs.readFileSync(memoryPath, 'utf-8');
+          }
+        } catch { /* file may not exist yet */ }
+      }
+    }
+
+    return (ctx.blockerResults?.length || ctx.relevantNotes?.length || ctx.sessionMemory) ? ctx : undefined;
   }
 
   /**

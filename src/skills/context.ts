@@ -5,6 +5,8 @@ export interface BlackboardContext {
   blockerResults?: { id: string; prompt: string; result: string }[];
   /** Notes addressed to or relevant to this task */
   relevantNotes?: Note[];
+  /** Session memory from a reused session (domain expertise + task history) */
+  sessionMemory?: string;
 }
 
 export interface PreparedTaskContext {
@@ -122,6 +124,15 @@ function buildBlackboardContext(ctx?: BlackboardContext): string {
     for (const n of ctx.relevantNotes) {
       parts.push(`- **${n.title}** (${n.source}): ${n.content.slice(0, 500)}`);
     }
+  }
+
+  if (ctx.sessionMemory) {
+    parts.push('## Session Memory (from previous tasks in this domain)\n');
+    // Cap at 2000 chars to avoid bloating the context window
+    const truncated = ctx.sessionMemory.length > 2000
+      ? ctx.sessionMemory.slice(0, 2000) + '\n...(truncated)'
+      : ctx.sessionMemory;
+    parts.push(truncated);
   }
 
   return parts.join('\n');
