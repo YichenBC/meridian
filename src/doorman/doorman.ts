@@ -523,32 +523,14 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     return needsActionPattern.test(content);
   }
 
-  /**
-   * Find the sessionId from the most recent completed task (same executor).
-   * This enables multi-turn: a follow-up task resumes the previous agent's
-   * conversation, so the agent remembers what it did last time.
-   */
-  private findReusableSession(executor?: string, source?: string): string | undefined {
-    if (!executor) return undefined;
-    const recent = this.blackboard.getAllTasks()
-      .filter((t) =>
-        t.status === 'completed'
-        && t.executor === executor
-        && t.sessionId
-        && (source ? this.resolveRouteableSource(t.source) === source : true)
-      )
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return recent[0]?.sessionId ?? undefined;
-  }
-
   private async createTask(prompt: string, executor?: string, model?: string, source?: string): Promise<void> {
     let enrichedPrompt = prompt;
     if (this.isToolExecutor(executor) && /\b(blackboard|database|sqlite|system.?check|self.?check|diagnos|state|db)\b/i.test(prompt)) {
-      enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${channelDbPath}. Tables: tasks, agents, feeds, approvals, notes. Project root: ${process.cwd()}`;
+      enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${channelDbPath}. Tables: tasks, agents, feeds, approvals, notes, sessions. Project root: ${process.cwd()}`;
     }
 
-    // Reuse previous session for multi-turn continuity
-    const sessionId = this.findReusableSession(executor, source);
+    // Session matching is now handled by the runner's session pool (findBestSession)
+    // instead of the old findReusableSession approach
 
     const task: Task = {
       id: crypto.randomUUID(),
@@ -560,7 +542,6 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
       error: null,
       executor: executor || undefined,
       model: model || undefined,
-      sessionId,
       source: source || 'user',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

@@ -5,6 +5,7 @@ import {
   FeedEntry,
   Approval,
   Note,
+  Session,
   BlackboardState,
 } from '../types.js';
 import * as db from './db.js';
@@ -19,6 +20,11 @@ export class Blackboard extends EventEmitter {
     const deleted = db.rotateFeeds(5000);
     if (deleted > 0) {
       logger.info({ deleted }, 'Rotated old feed entries');
+    }
+    // Cleanup stale sessions (older than 7 days, cap at 20)
+    const sessionsPruned = db.cleanupSessions();
+    if (sessionsPruned > 0) {
+      logger.info({ deleted: sessionsPruned }, 'Pruned stale sessions');
     }
   }
 
@@ -161,6 +167,32 @@ export class Blackboard extends EventEmitter {
 
   getNotesByTag(tag: string): Note[] {
     return db.getNotesByTag(tag);
+  }
+
+  // --- Sessions ---
+
+  createSession(session: Session): void {
+    db.createSession(session);
+  }
+
+  getSession(id: string): Session | undefined {
+    return db.getSession(id);
+  }
+
+  getSessionBySessionId(sessionId: string): Session | undefined {
+    return db.getSessionBySessionId(sessionId);
+  }
+
+  getAllSessions(): Session[] {
+    return db.getAllSessions();
+  }
+
+  updateSession(id: string, updates: Partial<Session>): void {
+    db.updateSession(id, updates);
+  }
+
+  deleteSession(id: string): void {
+    db.deleteSession(id);
   }
 
   // --- State snapshot ---

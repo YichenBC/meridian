@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import type { Task, AgentInfo, Skill, FeedEntry, Approval, AuditorMode } from '../types.js';
+import type { Task, AgentInfo, Skill, FeedEntry, Approval, AuditorMode, Session } from '../types.js';
 import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRegistry } from './registry.js';
 import { AgentExecutor } from './executor.js';
@@ -10,6 +10,66 @@ import { prepareTaskContext, prepareTaskContextWithCatalog, BlackboardContext } 
 import { decide, assessRisk } from '../blackboard/permissions.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+
+// --- Domain classification (keyword-based, no LLM needed) ---
+
+function extractTags(prompt: string): string[] {
+  const tagWords = prompt.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
+  // Filter to meaningful words, deduplicate
+  const stopWords = new Set(['the', 'and', 'for', 'this', 'that', 'with', 'from', 'into', 'about', 'what', 'how', 'can', 'does', 'will', 'not', 'are', 'was', 'were', 'been']);
+  return [...new Set(tagWords.filter(w => !stopWords.has(w)))].slice(0, 10);
+}
+
+function classifyDomain(prompt: string, skillName?: string): { domain: string; tags: string[] } {
+  // Skill-based shortcuts
+  if (skillName?.includes('knowledge') || skillName?.includes('ingest') || skillName?.includes('query'))
+    return { domain: 'knowledge', tags: extractTags(prompt) };
+  if (skillName?.includes('daily-brief') || skillName?.includes('blogwatcher'))
+    return { domain: 'research', tags: extractTags(prompt) };
+  if (skillName?.includes('meridian-system'))
+    return { domain: 'system', tags: ['meridian', 'codebase'] };
+
+  // Prompt-based fallback
+  if (/vault|obsidian|ingest|save this|knowledge/i.test(prompt))
+    return { domain: 'knowledge', tags: extractTags(prompt) };
+  if (/fix|bug|code|refactor|test|build/i.test(prompt))
+    return { domain: 'coding', tags: extractTags(prompt) };
+  if (/research|paper|arxiv|analyze/i.test(prompt))
+    return { domain: 'research', tags: extractTags(prompt) };
+
+  return { domain: 'general', tags: extractTags(prompt) };
+}
+
+function findBestSession(task: Task, sessions: Session[]): Session | null {
+  const { domain, tags } = classifyDomain(task.prompt);
+  let best: Session | null = null;
+  let bestScore = 0;
+
+  for (const session of sessions) {
+    let score = 0;
+    // Domain match: +10
+    if (session.domain === domain) score += 10;
+    // Tag overlap: +2 per matching tag
+    const sessionTags = (session.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    for (const tag of tags) {
+      if (sessionTags.includes(tag)) score += 2;
+    }
+    // Recency bonus: +5 if used in last hour, +3 if last day
+    const age = Date.now() - new Date(session.lastUsedAt).getTime();
+    if (age < 3600_000) score += 5;
+    else if (age < 86400_000) score += 3;
+    // Experience bonus: +1 per prior task (cap at 5)
+    score += Math.min(session.taskCount, 5);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = session;
+    }
+  }
+
+  // Minimum threshold: don't reuse irrelevant sessions
+  return bestScore >= 10 ? best : null;
+}
 
 interface RunningAgent {
   abort: AbortController;
@@ -131,6 +191,18 @@ export class AgentRunner {
     }
 
     const id = `agent-${crypto.randomUUID().slice(0, 8)}`;
+
+    // Session pool: find best matching session for this task if none pre-assigned
+    if (!task.sessionId) {
+      const allSessions = this.blackboard.getAllSessions();
+      const bestSession = findBestSession(task, allSessions);
+      if (bestSession) {
+        task.sessionId = bestSession.sessionId;
+        this.blackboard.updateTask(task.id, { sessionId: bestSession.sessionId });
+        logger.info({ taskId: task.id, sessionPoolId: bestSession.id, domain: bestSession.domain },
+          'Reusing session from pool');
+      }
+    }
 
     // Create per-agent data directory with MEMORY.md
     const agentDir = path.join(config.dataDir, 'agents', id);
@@ -301,6 +373,12 @@ export class AgentRunner {
         task.id);
       this.registry.update(id, { status: 'stopped', currentTaskId: null });
       this.registry.remove(id);
+
+      // Session pool: create or update session record
+      const finalSessionId = (meta.sessionId as string) || task.sessionId;
+      if (finalSessionId) {
+        this.updateSessionPool(task, finalSessionId, result.content);
+      }
 
       logger.info({ id, executor: executor.name, ...meta }, 'Agent completed');
 
@@ -514,6 +592,74 @@ export class AgentRunner {
     }
 
     return (ctx.blockerResults?.length || ctx.relevantNotes?.length) ? ctx : undefined;
+  }
+
+  /**
+   * Create or update a session record in the pool after task completion.
+   * Also writes enriched MEMORY.md for the session.
+   */
+  private updateSessionPool(task: Task, sessionId: string, resultContent: string): void {
+    const { domain, tags } = classifyDomain(task.prompt);
+    const summary = `${task.prompt.slice(0, 100)}${task.prompt.length > 100 ? '...' : ''}`;
+    const now = new Date().toISOString();
+
+    // Check if this session already exists in the pool
+    const existing = this.blackboard.getSessionBySessionId(sessionId);
+
+    if (existing) {
+      // Update existing session
+      const existingTags = (existing.tags || '').split(',').filter(Boolean);
+      const mergedTags = [...new Set([...existingTags, ...tags])].join(',');
+      this.blackboard.updateSession(existing.id, {
+        taskCount: existing.taskCount + 1,
+        summary: `${existing.summary} | ${summary}`,
+        tags: mergedTags || null,
+        lastUsedAt: now,
+        domain: existing.domain === domain ? domain : existing.domain, // keep original domain if different
+      });
+      logger.info({ poolId: existing.id, taskCount: existing.taskCount + 1 }, 'Updated session in pool');
+    } else {
+      // Create new session record
+      const poolId = `session-${crypto.randomUUID().slice(0, 8)}`;
+      this.blackboard.createSession({
+        id: poolId,
+        sessionId,
+        domain,
+        summary,
+        tags: tags.join(',') || null,
+        taskCount: 1,
+        lastUsedAt: now,
+        createdAt: now,
+      });
+      logger.info({ poolId, domain, sessionId: sessionId.slice(0, 12) }, 'Created session in pool');
+    }
+
+    // Write enriched MEMORY.md
+    this.enrichMemoryFile(sessionId, task, domain, tags, resultContent);
+  }
+
+  /**
+   * Write/append to a session-specific MEMORY.md with task history.
+   */
+  private enrichMemoryFile(sessionId: string, task: Task, domain: string, tags: string[], resultContent: string): void {
+    const sessionDir = path.join(config.dataDir, 'sessions', sessionId.slice(0, 16));
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const memoryPath = path.join(sessionDir, 'MEMORY.md');
+
+    const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 16);
+    const resultSummary = resultContent.length > 200
+      ? resultContent.slice(0, 200) + '...'
+      : resultContent;
+
+    if (!fs.existsSync(memoryPath)) {
+      // Create new MEMORY.md
+      const content = `# Session ${sessionId.slice(0, 16)}\n\n## Domain: ${domain}\n## Tags: ${tags.join(', ')}\n\n## Task History\n### ${timestamp} — ${task.prompt.slice(0, 60)}\n${resultSummary}\n`;
+      fs.writeFileSync(memoryPath, content);
+    } else {
+      // Append to existing
+      const entry = `\n### ${timestamp} — ${task.prompt.slice(0, 60)}\n${resultSummary}\n`;
+      fs.appendFileSync(memoryPath, entry);
+    }
   }
 
   private addFeed(type: FeedEntry['type'], source: string, content: string, taskId: string | null): void {

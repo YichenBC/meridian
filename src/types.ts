@@ -101,6 +101,18 @@ export interface Approval {
   resolvedAt: string | null;
 }
 
+// --- Session pool ---
+export interface Session {
+  id: string;              // e.g. "session-abc123"
+  sessionId: string;       // Claude CLI session_id (for --resume)
+  domain: string;          // e.g. "knowledge", "system", "research", "general"
+  summary: string;         // 1-2 sentence summary of what this session knows
+  tags: string | null;     // comma-separated: "vault,obsidian,papers,OPD"
+  taskCount: number;       // how many tasks this session has handled
+  lastUsedAt: string;
+  createdAt: string;
+}
+
 // --- Blackboard state snapshot ---
 export interface BlackboardState {
   tasks: Task[];

@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { Task, AgentInfo, FeedEntry, Approval, Note } from '../types.js';
+import type { Task, AgentInfo, FeedEntry, Approval, Note, Session } from '../types.js';
 
 let db: Database.Database;
 
@@ -82,6 +82,20 @@ function createSchema(): void {
   // Migration: add blockedBy (JSON array) and priority to tasks
   try { db.exec(`ALTER TABLE tasks ADD COLUMN blockedBy TEXT`); } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 0`); } catch { /* already exists */ }
+
+  // Session pool table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      sessionId TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      tags TEXT,
+      taskCount INTEGER DEFAULT 1,
+      lastUsedAt TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+  `);
 }
 
 export function initDatabase(dbPath: string): void {
@@ -321,4 +335,73 @@ export function getNotesByTag(tag: string): Note[] {
   const escaped = tag.replace(/[%_]/g, '\\$&');
   const stmt = db.prepare("SELECT * FROM notes WHERE tags LIKE ? ESCAPE '\\' ORDER BY createdAt DESC");
   return stmt.all(`%${escaped}%`) as Note[];
+}
+
+// --- Sessions ---
+
+export function createSession(session: Session): void {
+  const stmt = db.prepare(`
+    INSERT INTO sessions (id, sessionId, domain, summary, tags, taskCount, lastUsedAt, createdAt)
+    VALUES (@id, @sessionId, @domain, @summary, @tags, @taskCount, @lastUsedAt, @createdAt)
+  `);
+  stmt.run(session);
+}
+
+export function getSession(id: string): Session | undefined {
+  const stmt = db.prepare('SELECT * FROM sessions WHERE id = ?');
+  return stmt.get(id) as Session | undefined;
+}
+
+export function getSessionBySessionId(sessionId: string): Session | undefined {
+  const stmt = db.prepare('SELECT * FROM sessions WHERE sessionId = ?');
+  return stmt.get(sessionId) as Session | undefined;
+}
+
+export function getAllSessions(): Session[] {
+  const stmt = db.prepare('SELECT * FROM sessions ORDER BY lastUsedAt DESC');
+  return stmt.all() as Session[];
+}
+
+export function updateSession(id: string, updates: Partial<Session>): void {
+  const current = getSession(id);
+  if (!current) return;
+
+  const merged = { ...current, ...updates, id };
+  const stmt = db.prepare(`
+    UPDATE sessions SET
+      sessionId = @sessionId,
+      domain = @domain,
+      summary = @summary,
+      tags = @tags,
+      taskCount = @taskCount,
+      lastUsedAt = @lastUsedAt,
+      createdAt = @createdAt
+    WHERE id = @id
+  `);
+  stmt.run(merged);
+}
+
+export function deleteSession(id: string): void {
+  const stmt = db.prepare('DELETE FROM sessions WHERE id = ?');
+  stmt.run(id);
+}
+
+/**
+ * Remove sessions older than maxAgeMs and enforce a cap on total sessions.
+ * Returns number of deleted sessions.
+ */
+export function cleanupSessions(maxAgeMs: number = 7 * 24 * 3600_000, maxCount: number = 20): number {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const stale = db.prepare("DELETE FROM sessions WHERE lastUsedAt < ?");
+  let deleted = stale.run(cutoff).changes;
+
+  // Enforce cap: keep only the most recent maxCount
+  const overflow = db.prepare(`
+    DELETE FROM sessions WHERE id NOT IN (
+      SELECT id FROM sessions ORDER BY lastUsedAt DESC LIMIT ?
+    )
+  `);
+  deleted += overflow.run(maxCount).changes;
+
+  return deleted;
 }
