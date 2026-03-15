@@ -309,6 +309,10 @@ export class AgentRunner {
         prepared,
         signal: abort.signal,
         model: effectiveModel,
+        onPid: (pid) => {
+          // Store PID on agent record for process group kill support
+          this.registry.update(id, { pid });
+        },
         onProgress: (chunk) => {
           const now = Date.now();
 

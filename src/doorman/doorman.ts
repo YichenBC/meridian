@@ -22,7 +22,8 @@ interface DoormanAction {
 
 // --- Fast path patterns (no LLM needed) ---
 const STATUS_PATTERNS = /^(.*\bstatus\b.*|what('s| is) (happening|going on)|show state|overview)\s*[.!?]*$/i;
-const KILL_ALL_PATTERNS = /^(stop|cancel|kill|abort|quit)\s*(all|everything|agents?)?\s*[.!?]*$/i;
+const KILL_ALL_PATTERNS = /^(stop|cancel|kill|abort|quit)\s*(all|everything|agents?|tasks?|it)?\s*[.!?]*$/i;
+const KILL_INTENT_PATTERNS = /^(stop|cancel|kill|abort|don'?t)\s+(the|that|this|my|posting|running|current)\b/i;
 const APPROVAL_POSITIVE = /\b(approve|yes|accept|confirm|ok|okay|go ahead|do it)\b/i;
 const APPROVAL_NEGATIVE = /\b(reject|no|deny|decline|don't|cancel)\b/i;
 
@@ -151,6 +152,34 @@ export class Doorman {
       } else {
         this.runner.killAll();
         await this.respond(`Stopped all ${running.length} running task${running.length > 1 ? 's' : ''}.`, msg.channelId);
+      }
+      return;
+    }
+
+    // Kill intent: "stop the post", "cancel that task", "don't post", etc.
+    if (KILL_INTENT_PATTERNS.test(trimmed)) {
+      const running = this.registry.getRunning();
+      if (running.length === 0) {
+        await this.respond('Nothing running right now.', msg.channelId);
+      } else if (running.length === 1) {
+        this.runner.killAgent(running[0].id);
+        const task = this.blackboard.getTask(running[0].currentTaskId!);
+        const label = task?.prompt.slice(0, 60) || 'task';
+        await this.respond(`Stopped: ${label}`, msg.channelId);
+      } else {
+        // Multiple running — try to match by keyword overlap with user's message
+        const matchId = this.findRunningTaskByPrompt(trimmed, msg.channelId);
+        if (matchId) {
+          this.runner.killAgent(matchId);
+          const agent = this.registry.get(matchId);
+          const task = agent?.currentTaskId ? this.blackboard.getTask(agent.currentTaskId) : null;
+          const label = task?.prompt.slice(0, 60) || 'task';
+          await this.respond(`Stopped: ${label}`, msg.channelId);
+        } else {
+          // Can't determine which one — kill all
+          this.runner.killAll();
+          await this.respond(`Couldn't determine which task — stopped all ${running.length} running tasks.`, msg.channelId);
+        }
       }
       return;
     }
@@ -521,6 +550,45 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     }
 
     return needsActionPattern.test(content);
+  }
+
+  /**
+   * Find the best matching running agent by keyword overlap between
+   * the user's kill message and each running task's prompt.
+   * Returns the agent ID of the best match, or null if no good match.
+   */
+  private findRunningTaskByPrompt(hint: string, channelId: string): string | null {
+    const running = this.registry.getRunning();
+    const hintWords = new Set(
+      hint.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2)
+    );
+    // Remove common kill-intent words so they don't pollute matching
+    const stopWords = new Set(['stop', 'cancel', 'kill', 'abort', 'don', 'the', 'that', 'this', 'task', 'running', 'current', 'please']);
+    const keywords = [...hintWords].filter(w => !stopWords.has(w));
+
+    if (keywords.length === 0) return null;
+
+    let bestId: string | null = null;
+    let bestScore = 0;
+
+    for (const agent of running) {
+      // Scope to this channel
+      const task = agent.currentTaskId ? this.blackboard.getTask(agent.currentTaskId) : null;
+      if (!task) continue;
+      if (this.resolveRouteableSource(task.source) !== channelId) continue;
+
+      const promptWords = task.prompt.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+      let score = 0;
+      for (const kw of keywords) {
+        if (promptWords.includes(kw)) score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestId = agent.id;
+      }
+    }
+
+    return bestScore > 0 ? bestId : null;
   }
 
   private async createTask(prompt: string, executor?: string, model?: string, source?: string): Promise<void> {

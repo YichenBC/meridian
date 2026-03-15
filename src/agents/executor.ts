@@ -8,6 +8,7 @@ export interface ExecuteParams {
   signal: AbortSignal;
   model?: string;          // model override (from task.model or skill.model)
   onProgress: (text: string) => void;
+  onPid?: (pid: number) => void;  // report child process PID for kill support
   requestApproval: (description: string) => Promise<boolean>;
 }
 

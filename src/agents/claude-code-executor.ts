@@ -16,7 +16,7 @@ export class ClaudeCodeExecutor implements AgentExecutor {
   ) {}
 
   async execute(params: ExecuteParams): Promise<ExecuteResult> {
-    const { task, prepared, signal, model: modelOverride, onProgress } = params;
+    const { task, prepared, signal, model: modelOverride, onProgress, onPid } = params;
     const prompt = prepared.toolPrompt;
 
     // Always use project root as cwd so .mcp.json (MCP servers) is picked up.
@@ -49,6 +49,11 @@ export class ClaudeCodeExecutor implements AgentExecutor {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, CLAUDECODE: undefined },
       });
+
+      // Report PID for process group kill support
+      if (child.pid && onPid) {
+        onPid(child.pid);
+      }
 
       let stdout = '';
       let stderr = '';
