@@ -1,6 +1,6 @@
 # Meridian
 
-> **Personal experimental project** — this is a self-use AI agent orchestration system. Not production-ready. Published for reference only.
+> **Personal experimental project** — this is a self-use AI agent orchestration system, entirely vibe-coded. Expect rough edges and bugs. Not production-ready. Published for reference only.
 
 A blackboard-based coordination brain for multi-agent AI orchestration. Meridian uses the **Continental Architecture**: a Doorman (intent classification), a Blackboard (shared state hub), and Specialists (pluggable executors) — coordinating work across LLM providers, Claude Code CLI, Codex CLI, and external tools.
 
