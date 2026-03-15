@@ -2,7 +2,11 @@
 
 > **Personal experimental project** — this is a self-use AI agent orchestration system, entirely vibe-coded. Expect rough edges and bugs. Not production-ready. Published for reference only.
 
-A blackboard-based coordination brain for multi-agent AI orchestration. Meridian uses the **Continental Architecture**: a Doorman (intent classification), a Blackboard (shared state hub), and Specialists (pluggable executors) — coordinating work across LLM providers, Claude Code CLI, Codex CLI, and external tools.
+Inspired by OpenClaw, I built a blackboard-based coordination brain for multi-agent AI orchestration by entirely **vibe coding** (Claude Code). 
+Originally, I am tired of waiting OpenClaw for handling my message queue, in which it cannot tell me the progress of previous task.
+And I also want to make use of Claude Code and its skills.
+So I want to build a lightweight OpenClaw, **Meridian**, which could always respond to me.
+Meridian uses the **Continental Architecture**: a Doorman (intent classification), a Blackboard (shared state hub), and Specialists (pluggable executors) — coordinating work across LLM providers, Claude Code CLI, Codex CLI, and external tools.
 
 Currently used as a personal knowledge assistant: ingesting articles/papers/images into an Obsidian vault, answering questions from stored knowledge, and generating daily research briefings — all accessible via Telegram and Feishu.
 
