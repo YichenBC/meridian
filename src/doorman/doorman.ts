@@ -572,16 +572,18 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     let bestScore = 0;
 
     for (const agent of running) {
-      // Scope to this channel
       const task = agent.currentTaskId ? this.blackboard.getTask(agent.currentTaskId) : null;
       if (!task) continue;
-      if (this.resolveRouteableSource(task.source) !== channelId) continue;
 
       const promptWords = task.prompt.toLowerCase().split(/\W+/).filter(w => w.length > 2);
       let score = 0;
       for (const kw of keywords) {
         if (promptWords.includes(kw)) score++;
       }
+      // Boost score for tasks from the same channel
+      const taskChannel = this.resolveRouteableSource(task.source);
+      if (taskChannel === channelId) score += 1;
+
       if (score > bestScore) {
         bestScore = score;
         bestId = agent.id;
