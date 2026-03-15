@@ -7,6 +7,8 @@ export interface BlackboardContext {
   relevantNotes?: Note[];
   /** Session memory from a reused session (domain expertise + task history) */
   sessionMemory?: string;
+  /** Domain-specific system prompt (e.g., knowledge assistant spec) */
+  domainSystemPrompt?: string;
 }
 
 export interface PreparedTaskContext {
@@ -79,6 +81,9 @@ export function prepareTaskContextWithCatalog(task: Task, skills: Skill[], bbCon
   const contextSection = buildBlackboardContext(bbContext);
   const catalog = buildSkillsCatalog(skills);
 
+  // Domain system prompt takes precedence over generic base prompt
+  const basePrompt = bbContext?.domainSystemPrompt || buildBaseSystemPrompt(task.role);
+
   const skillSelectionInstructions = catalog ? `
 ## Available Skills
 
@@ -92,7 +97,7 @@ ${catalog}
 ` : '';
 
   return {
-    systemPrompt: `${buildBaseSystemPrompt(task.role)}${skillSelectionInstructions}`,
+    systemPrompt: `${basePrompt}${skillSelectionInstructions}`,
     userPrompt,
     toolPrompt: `${skillSelectionInstructions}
 ## Task

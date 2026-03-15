@@ -30,11 +30,11 @@ function classifyDomain(prompt: string, skillName?: string): { domain: string; t
     return { domain: 'system', tags: ['meridian', 'codebase'] };
 
   // Prompt-based fallback
-  if (/vault|obsidian|ingest|save this|knowledge/i.test(prompt))
+  if (/vault|obsidian|ingest|save this|knowledge|总结|整理|笔记|链接|论文|知识|摘要|归纳|沉淀|收藏/i.test(prompt))
     return { domain: 'knowledge', tags: extractTags(prompt) };
   if (/fix|bug|code|refactor|test|build/i.test(prompt))
     return { domain: 'coding', tags: extractTags(prompt) };
-  if (/research|paper|arxiv|analyze/i.test(prompt))
+  if (/research|paper|arxiv|analyze|调研|研究|分析/i.test(prompt))
     return { domain: 'research', tags: extractTags(prompt) };
 
   return { domain: 'general', tags: extractTags(prompt) };
@@ -615,7 +615,18 @@ export class AgentRunner {
       }
     }
 
-    return (ctx.blockerResults?.length || ctx.relevantNotes?.length || ctx.sessionMemory) ? ctx : undefined;
+    // Inject domain-specific system prompt for knowledge tasks
+    const { domain } = classifyDomain(task.prompt);
+    if (domain === 'knowledge') {
+      const knowledgePromptPath = path.join(config.skillsDir, 'knowledge-system', 'SYSTEM.md');
+      try {
+        if (fs.existsSync(knowledgePromptPath)) {
+          ctx.domainSystemPrompt = fs.readFileSync(knowledgePromptPath, 'utf-8');
+        }
+      } catch { /* file may not exist */ }
+    }
+
+    return (ctx.blockerResults?.length || ctx.relevantNotes?.length || ctx.sessionMemory || ctx.domainSystemPrompt) ? ctx : undefined;
   }
 
   /**
