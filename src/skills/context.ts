@@ -15,6 +15,25 @@ export interface PreparedTaskContext {
   skillSourceDir: string | null;
 }
 
+/**
+ * Build a skills catalog XML block for LLM-based skill selection.
+ * Following the OpenClaw pattern: inject name + description + location,
+ * let the agent decide which skill applies and read its SKILL.md.
+ */
+function buildSkillsCatalog(skills: Skill[]): string {
+  if (skills.length === 0) return '';
+
+  const entries = skills.map(s =>
+    `  <skill>\n    <name>${s.name}</name>\n    <description>${s.description}</description>\n    <location>${s.sourceDir}/SKILL.md</location>\n  </skill>`
+  ).join('\n');
+
+  return `<available_skills>\n${entries}\n</available_skills>`;
+}
+
+/**
+ * Prepare task context with a single pre-selected skill (legacy path).
+ * Used when a specific skill is already determined (e.g., by explicit request).
+ */
 export function prepareTaskContext(task: Task, skill: Skill | null, bbContext?: BlackboardContext): PreparedTaskContext {
   const userPrompt = task.prompt;
   const contextSection = buildBlackboardContext(bbContext);
@@ -46,6 +65,38 @@ ${skill.content}
 ${userPrompt}${contextSection ? `\n\n${contextSection}` : ''}`,
     skillName: skill.name,
     skillSourceDir: skill.sourceDir,
+  };
+}
+
+/**
+ * Prepare task context with LLM-based skill selection (OpenClaw pattern).
+ * Injects all eligible skills as a catalog; the agent reads the relevant SKILL.md.
+ */
+export function prepareTaskContextWithCatalog(task: Task, skills: Skill[], bbContext?: BlackboardContext): PreparedTaskContext {
+  const userPrompt = task.prompt;
+  const contextSection = buildBlackboardContext(bbContext);
+  const catalog = buildSkillsCatalog(skills);
+
+  const skillSelectionInstructions = catalog ? `
+## Available Skills
+
+Before starting work, scan the skill descriptions below.
+- If exactly one skill clearly applies to this task: read its SKILL.md file at the given location, then follow its instructions.
+- If multiple skills could apply: choose the most specific one, read its SKILL.md, then follow it.
+- If none clearly apply: proceed without a skill — complete the task using your own judgment.
+- Never read more than one SKILL.md up front.
+
+${catalog}
+` : '';
+
+  return {
+    systemPrompt: `${buildBaseSystemPrompt(task.role)}${skillSelectionInstructions}`,
+    userPrompt,
+    toolPrompt: `${skillSelectionInstructions}
+## Task
+${userPrompt}${contextSection ? `\n\n${contextSection}` : ''}`,
+    skillName: null,
+    skillSourceDir: null,
   };
 }
 

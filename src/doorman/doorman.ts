@@ -5,8 +5,9 @@ import { AgentRunner } from '../agents/runner.js';
 import { AgentRegistry } from '../agents/registry.js';
 import { CodexRuntime } from '../agents/codex-runtime.js';
 import { Channel, UserMessage, Task, Approval } from '../types.js';
-import { config, channelDbPath } from '../config.js';
+import { config, channelDbPath, telegramConfig } from '../config.js';
 import { logger } from '../logger.js';
+import { formatAttachmentsPrompt } from '../media.js';
 import { buildSkillInstallTaskPrompt, parseSkillInstallIntent } from '../skills/commands.js';
 
 /**
@@ -39,6 +40,8 @@ const FAST_TASK_PATTERNS = [
   /^(draft|compose|prepare|outline)\s+/i,                                 // "draft a Slack message...", "compose an email..."
   /^(list|show me|give me|get|pull)\s+(the |all |my |recent |\d)/i,       // "list all files...", "show me the logs..."
   /^(go to|navigate to|visit)\s+https?:/i,                                // "go to https://..."
+  /^(save|remember|ingest|store|capture|bookmark)\s+(this|the|a|an|my)\b/i, // "save this article...", "remember this..."
+  /^(what do I know about|search my notes|find in my vault|look up in my)\b/i, // "what do I know about X?"
 ];
 
 /**
@@ -166,11 +169,22 @@ export class Doorman {
       return;
     }
 
+    // --- Fast-path: messages with attachments are always tasks ---
+    if (msg.attachments && msg.attachments.length > 0) {
+      const mediaNote = formatAttachmentsPrompt(msg.attachments);
+      const taskPrompt = trimmed
+        ? `${trimmed}\n\n${mediaNote}`
+        : `Process the attached file(s).\n\n${mediaNote}`;
+      logger.info({ msg: trimmed.slice(0, 80), attachments: msg.attachments.length }, 'Fast-path: routing media as task');
+      await this.createTask(taskPrompt, this.toolExecutor, undefined, msg.channelId);
+      await this.respond(`Got it — processing ${msg.attachments.length} file${msg.attachments.length > 1 ? 's' : ''}.`, msg.channelId);
+      return;
+    }
+
     // --- Fast-path task routing: skip LLM triage for obvious work requests ---
     if (FAST_TASK_PATTERNS.some(p => p.test(trimmed))) {
       logger.info({ msg: trimmed.slice(0, 80) }, 'Fast-path: routing as task (skipping triage)');
-      const needsTools = this.messageNeedsTools(trimmed);
-      await this.createTask(trimmed, needsTools ? this.toolExecutor : undefined, undefined, msg.channelId);
+      await this.createTask(trimmed, this.toolExecutor, undefined, msg.channelId);
       await this.respond("On it.", msg.channelId);
       return;
     }
@@ -627,6 +641,11 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
   private resolveRouteableSource(source?: string): string | undefined {
     if (!source) return undefined;
     if (/^(tg|feishu|cli|a2ui):/.test(source)) return source;
+    // Proactive tasks (cron, scheduler, api) have no channel — route to the
+    // configured Telegram chatId so the user receives the result.
+    if (/^(cron|scheduler|api)$/.test(source) && telegramConfig?.chatId) {
+      return `tg:${telegramConfig.chatId}`;
+    }
     return undefined;
   }
 }

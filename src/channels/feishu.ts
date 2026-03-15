@@ -1,7 +1,8 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import axios from 'axios';
 import crypto from 'crypto';
-import { Channel, OnInboundMessage, UserMessage } from '../types.js';
+import { Channel, OnInboundMessage, UserMessage, Attachment } from '../types.js';
+import { saveMedia } from '../media.js';
 import { logger } from '../logger.js';
 
 export interface FeishuConfig {
@@ -100,9 +101,34 @@ export class FeishuChannel implements Channel {
       this.pruneDedup();
     }
 
-    // Handle text and post message types
-    if (message.message_type !== 'text' && message.message_type !== 'post') return;
+    const supportedTypes = ['text', 'post', 'image', 'file'];
+    if (!supportedTypes.includes(message.message_type)) return;
 
+    const chatId = message.chat_id;
+    this.lastChatId = chatId;
+    this.lastMessageId = messageId;
+    if (messageId) {
+      this.lastMessageIdByChat.set(chatId, messageId);
+    }
+    const sender = data?.sender;
+    const senderName =
+      sender?.sender_id?.open_id ||
+      sender?.sender_id?.user_id ||
+      'Unknown';
+
+    const timestamp = message.create_time
+      ? new Date(parseInt(message.create_time, 10)).toISOString()
+      : new Date().toISOString();
+
+    // Handle image and file types (download media, emit with attachments)
+    if (message.message_type === 'image' || message.message_type === 'file') {
+      this.handleMediaMessage(message, chatId, senderName, timestamp).catch((err) => {
+        logger.error({ err, type: message.message_type }, 'Failed to handle Feishu media message');
+      });
+      return;
+    }
+
+    // Handle text and post types
     let text: string;
     try {
       const content = JSON.parse(message.content);
@@ -123,22 +149,6 @@ export class FeishuChannel implements Channel {
     text = text.replace(/@_user_\d+/g, '').trim();
     if (!text) return;
 
-    const chatId = message.chat_id;
-    this.lastChatId = chatId;  // Track for broadcast replies
-    this.lastMessageId = messageId;  // Track for typing indicator
-    if (messageId) {
-      this.lastMessageIdByChat.set(chatId, messageId);
-    }
-    const sender = data?.sender;
-    const senderName =
-      sender?.sender_id?.open_id ||
-      sender?.sender_id?.user_id ||
-      'Unknown';
-
-    const timestamp = message.create_time
-      ? new Date(parseInt(message.create_time, 10)).toISOString()
-      : new Date().toISOString();
-
     const msg: UserMessage = {
       id: crypto.randomUUID(),
       channelId: `feishu:${chatId}`,
@@ -149,6 +159,78 @@ export class FeishuChannel implements Channel {
 
     logger.info({ chatId, sender: senderName, textLen: text.length }, 'Feishu message received');
     this.onMessage(msg);
+  }
+
+  /**
+   * Download image or file from Feishu and emit as UserMessage with attachment.
+   */
+  private async handleMediaMessage(
+    message: any,
+    chatId: string,
+    senderName: string,
+    timestamp: string,
+  ): Promise<void> {
+    let content: any;
+    try {
+      content = JSON.parse(message.content);
+    } catch {
+      return;
+    }
+
+    let attachment: Attachment;
+
+    if (message.message_type === 'image') {
+      const imageKey = content.image_key;
+      if (!imageKey) return;
+
+      const response: any = await this.client.im.messageResource.get({
+        path: { message_id: message.message_id, file_key: imageKey },
+        params: { type: 'image' },
+      });
+
+      // Lark SDK returns the file data as a readable stream or buffer
+      const buffer = Buffer.isBuffer(response) ? response : Buffer.from(response);
+      attachment = saveMedia(buffer, 'image/jpeg', `feishu-${imageKey}.jpg`);
+    } else {
+      // file type
+      const fileKey = content.file_key;
+      const fileName = content.file_name || `feishu-file-${message.message_id}`;
+      if (!fileKey) return;
+
+      const response: any = await this.client.im.messageResource.get({
+        path: { message_id: message.message_id, file_key: fileKey },
+        params: { type: 'file' },
+      });
+
+      const buffer = Buffer.isBuffer(response) ? response : Buffer.from(response);
+      // Infer content type from filename
+      const ext = fileName.split('.').pop()?.toLowerCase() || '';
+      const mimeMap: Record<string, string> = {
+        pdf: 'application/pdf',
+        doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        txt: 'text/plain',
+        md: 'text/markdown',
+      };
+      const contentType = mimeMap[ext] || 'application/octet-stream';
+      attachment = saveMedia(buffer, contentType, fileName);
+    }
+
+    logger.info({ chatId, type: message.message_type, path: attachment.path }, 'Feishu media downloaded');
+
+    this.onMessage({
+      id: crypto.randomUUID(),
+      channelId: `feishu:${chatId}`,
+      sender: senderName,
+      content: '',  // No text content for standalone media messages
+      attachments: [attachment],
+      timestamp,
+    });
   }
 
   private pruneDedup(): void {

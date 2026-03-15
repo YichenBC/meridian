@@ -10,12 +10,21 @@ export interface Channel {
 
 export type OnInboundMessage = (message: UserMessage) => void;
 
+// --- Attachments ---
+export interface Attachment {
+  path: string;         // absolute local path to downloaded file
+  contentType: string;  // MIME type: image/jpeg, application/pdf, etc.
+  fileName?: string;    // original filename if available
+  size?: number;        // bytes
+}
+
 // --- Messages ---
 export interface UserMessage {
   id: string;
   channelId: string;    // e.g. "cli:0", "tg:12345"
   sender: string;
   content: string;
+  attachments?: Attachment[];
   timestamp: string;
 }
 

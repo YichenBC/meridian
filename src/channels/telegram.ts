@@ -2,8 +2,19 @@ import { Bot } from 'grammy';
 import crypto from 'crypto';
 import net from 'net';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { Channel, OnInboundMessage, UserMessage } from '../types.js';
+import { Channel, OnInboundMessage, UserMessage, Attachment } from '../types.js';
+import { saveMedia } from '../media.js';
 import { logger } from '../logger.js';
+
+/** Buffered media group: collects photos/docs with the same media_group_id */
+interface MediaGroupBuffer {
+  chatId: string;
+  sender: string;
+  caption: string;
+  attachments: Attachment[];
+  timestamp: string;
+  timer: NodeJS.Timeout;
+}
 
 export class TelegramChannel implements Channel {
   name = 'telegram';
@@ -13,6 +24,7 @@ export class TelegramChannel implements Channel {
   private botToken: string;
   private chatId: string | null;
   private proxy: string | null;
+  private mediaGroups = new Map<string, MediaGroupBuffer>();
 
   constructor(botToken: string, onMessage: OnInboundMessage, chatId?: string, proxy?: string) {
     this.botToken = botToken;
@@ -43,20 +55,12 @@ export class TelegramChannel implements Channel {
       if (ctx.message.text.startsWith('/')) return;
 
       const chatId = ctx.chat.id.toString();
-
-      // If restricted to a specific chat, ignore others
       if (this.chatId && chatId !== this.chatId) return;
-
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id.toString() ||
-        'Unknown';
 
       const msg: UserMessage = {
         id: crypto.randomUUID(),
         channelId: `tg:${chatId}`,
-        sender: senderName,
+        sender: this.getSenderName(ctx),
         content: ctx.message.text,
         timestamp: new Date(ctx.message.date * 1000).toISOString(),
       };
@@ -64,11 +68,79 @@ export class TelegramChannel implements Channel {
       this.onMessage(msg);
     });
 
+    // Photo messages (single or media group)
+    this.bot.on('message:photo', async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      if (this.chatId && chatId !== this.chatId) return;
+
+      try {
+        // Take largest photo size (last in array)
+        const photo = ctx.message.photo[ctx.message.photo.length - 1];
+        const attachment = await this.downloadFile(photo.file_id, 'image/jpeg');
+
+        const mediaGroupId = ctx.message.media_group_id;
+        if (mediaGroupId) {
+          this.bufferMediaGroup(mediaGroupId, {
+            chatId,
+            sender: this.getSenderName(ctx),
+            caption: ctx.message.caption || '',
+            attachment,
+            timestamp: new Date(ctx.message.date * 1000).toISOString(),
+          });
+        } else {
+          // Single photo
+          this.onMessage({
+            id: crypto.randomUUID(),
+            channelId: `tg:${chatId}`,
+            sender: this.getSenderName(ctx),
+            content: ctx.message.caption || '',
+            attachments: [attachment],
+            timestamp: new Date(ctx.message.date * 1000).toISOString(),
+          });
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to download Telegram photo');
+      }
+    });
+
+    // Document messages (PDF, Word, etc.)
+    this.bot.on('message:document', async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      if (this.chatId && chatId !== this.chatId) return;
+
+      try {
+        const doc = ctx.message.document;
+        const contentType = doc.mime_type || 'application/octet-stream';
+        const attachment = await this.downloadFile(doc.file_id, contentType, doc.file_name);
+
+        const mediaGroupId = ctx.message.media_group_id;
+        if (mediaGroupId) {
+          this.bufferMediaGroup(mediaGroupId, {
+            chatId,
+            sender: this.getSenderName(ctx),
+            caption: ctx.message.caption || '',
+            attachment,
+            timestamp: new Date(ctx.message.date * 1000).toISOString(),
+          });
+        } else {
+          this.onMessage({
+            id: crypto.randomUUID(),
+            channelId: `tg:${chatId}`,
+            sender: this.getSenderName(ctx),
+            content: ctx.message.caption || '',
+            attachments: [attachment],
+            timestamp: new Date(ctx.message.date * 1000).toISOString(),
+          });
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to download Telegram document');
+      }
+    });
+
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Init fetches bot info, start begins long polling
     await this.bot.init();
     logger.info({ username: this.bot.botInfo.username, id: this.bot.botInfo.id }, 'Telegram bot connected');
     this.bot.start({ drop_pending_updates: true });
@@ -100,7 +172,6 @@ export class TelegramChannel implements Channel {
           await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
           logger.info({ chatId, length: chunk.length }, 'Telegram message sent');
         } catch {
-          // Fallback: send as plain text if HTML parsing fails
           await this.bot.api.sendMessage(chatId, stripHtml(chunk));
           logger.info({ chatId, length: stripHtml(chunk).length }, 'Telegram message sent (plain text fallback)');
         }
@@ -120,6 +191,89 @@ export class TelegramChannel implements Channel {
       this.bot = null;
       logger.info('Telegram bot stopped');
     }
+  }
+
+  // --- Private helpers ---
+
+  private getSenderName(ctx: any): string {
+    return (
+      ctx.from?.first_name ||
+      ctx.from?.username ||
+      ctx.from?.id?.toString() ||
+      'Unknown'
+    );
+  }
+
+  /**
+   * Download a file from Telegram by file_id, save to data/media/.
+   */
+  private async downloadFile(fileId: string, contentType: string, fileName?: string): Promise<Attachment> {
+    if (!this.bot) throw new Error('Bot not connected');
+
+    const file = await this.bot.api.getFile(fileId);
+    if (!file.file_path) throw new Error('Telegram returned no file_path');
+
+    const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    // Detect filename from file_path if not provided
+    const name = fileName || file.file_path.split('/').pop() || undefined;
+
+    return saveMedia(buffer, contentType, name);
+  }
+
+  /**
+   * Buffer media group items (photos/docs sent together).
+   * Telegram sends each item as a separate update with the same media_group_id.
+   * We buffer for 500ms after the last item, then emit one UserMessage.
+   */
+  private bufferMediaGroup(
+    mediaGroupId: string,
+    item: { chatId: string; sender: string; caption: string; attachment: Attachment; timestamp: string },
+  ): void {
+    const existing = this.mediaGroups.get(mediaGroupId);
+
+    if (existing) {
+      existing.attachments.push(item.attachment);
+      // Use first non-empty caption
+      if (!existing.caption && item.caption) {
+        existing.caption = item.caption;
+      }
+      // Reset timer
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => this.flushMediaGroup(mediaGroupId), 500);
+    } else {
+      const timer = setTimeout(() => this.flushMediaGroup(mediaGroupId), 500);
+      this.mediaGroups.set(mediaGroupId, {
+        chatId: item.chatId,
+        sender: item.sender,
+        caption: item.caption,
+        attachments: [item.attachment],
+        timestamp: item.timestamp,
+        timer,
+      });
+    }
+  }
+
+  private flushMediaGroup(mediaGroupId: string): void {
+    const group = this.mediaGroups.get(mediaGroupId);
+    if (!group) return;
+    this.mediaGroups.delete(mediaGroupId);
+
+    logger.info({ mediaGroupId, count: group.attachments.length }, 'Flushing media group');
+
+    this.onMessage({
+      id: crypto.randomUUID(),
+      channelId: `tg:${group.chatId}`,
+      sender: group.sender,
+      content: group.caption,
+      attachments: group.attachments,
+      timestamp: group.timestamp,
+    });
   }
 
   private resolveTargetChatId(targetChannelId?: string): string | null {
@@ -163,39 +317,18 @@ async function isProxyReachable(proxyUrl: string): Promise<boolean> {
   });
 }
 
-/**
- * Convert common markdown to Telegram-supported HTML.
- * Telegram HTML supports: <b>, <i>, <code>, <pre>, <a>, <s>, <u>
- */
 function markdownToTelegramHtml(text: string): string {
   let html = escapeHtml(text);
-
-  // Code blocks: ```lang\ncode\n``` → <pre>code</pre>
   html = html.replace(/```(?:\w*)\n([\s\S]*?)```/g, '<pre>$1</pre>');
-
-  // Inline code: `code` → <code>code</code>
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-  // Bold: **text** or __text__
   html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   html = html.replace(/__(.+?)__/g, '<b>$1</b>');
-
-  // Italic: *text* or _text_ (but not inside words like file_name)
   html = html.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '<i>$1</i>');
   html = html.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '<i>$1</i>');
-
-  // Strikethrough: ~~text~~
   html = html.replace(/~~(.+?)~~/g, '<s>$1</s>');
-
-  // Headers: # Title → <b>Title</b> (Telegram has no headers)
   html = html.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
-
-  // Bullet lists: - item or * item → • item
   html = html.replace(/^[\s]*[-*]\s+/gm, '• ');
-
-  // Links: [text](url) → <a href="url">text</a>
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-
   return html;
 }
 

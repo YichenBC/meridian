@@ -6,7 +6,7 @@ import { Blackboard } from '../blackboard/blackboard.js';
 import { AgentRegistry } from './registry.js';
 import { AgentExecutor } from './executor.js';
 import { loadSkills } from '../skills/loader.js';
-import { prepareTaskContext, BlackboardContext } from '../skills/context.js';
+import { prepareTaskContext, prepareTaskContextWithCatalog, BlackboardContext } from '../skills/context.js';
 import { decide, assessRisk } from '../blackboard/permissions.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -124,8 +124,7 @@ export class AgentRunner {
     // Hot-reload skills so newly installed ones are available
     this.reloadSkills();
 
-    const skill = this.findSkillForTask(task);
-    const executor = this.resolveExecutor(skill, task);
+    const executor = this.resolveExecutor(null, task);
     if (!executor) {
       logger.error('No executor available');
       return null;
@@ -199,7 +198,7 @@ export class AgentRunner {
       }
     }, 10000);
     runningAgent.timeout = timeout;
-    const promise = this.runExecutor(id, task, skill, executor, abort, timeout, runningAgent);
+    const promise = this.runExecutor(id, task, null, executor, abort, timeout, runningAgent);
     runningAgent.promise = promise;
     this.running.set(id, runningAgent);
 
@@ -222,7 +221,11 @@ export class AgentRunner {
     try {
       const effectiveModel = task.model || skill?.model || undefined;
       const bbContext = this.buildBlackboardContext(task);
-      const prepared = prepareTaskContext(task, skill, bbContext);
+
+      // Use catalog-based skill selection (OpenClaw pattern): inject all eligible
+      // skill descriptions into the prompt, let the agent pick and read the relevant SKILL.md.
+      const eligibleSkills = this.skills.filter(s => s.eligibility.eligible);
+      const prepared = prepareTaskContextWithCatalog(task, eligibleSkills, bbContext);
 
       // Throttle Blackboard writes: update lastActivityAt every 5s, progress feed every 30s
       let lastActivityWrite = 0;
@@ -427,7 +430,7 @@ export class AgentRunner {
    * Priority: task.executor > skill.executor > 'llm' default.
    */
   private resolveExecutor(skill: Skill | null, task?: Task): AgentExecutor | undefined {
-    const name = task?.executor || skill?.executor || 'llm';
+    const name = task?.executor || skill?.executor || 'claude-code';
     const preferred = this.executors.get(name);
     if (preferred) return preferred;
 

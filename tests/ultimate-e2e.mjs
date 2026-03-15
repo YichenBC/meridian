@@ -283,35 +283,46 @@ try {
     const feedsBefore = client.feeds.length;
     client.send('Go to https://docs.anthropic.com/en/docs/about-claude/models and summarize the available Claude models and their context windows. List each model name and its max output tokens.');
 
-    const ack = await client.waitForFeed('doorman_response',
-      f => client.feeds.indexOf(f) >= feedsBefore, 30000);
-    assert.ok(ack, 'Should get acknowledgment');
-    log(`  Ack: ${ack.content.slice(0, 100)}`);
+    // Doorman may answer directly (codex triage has browser access) or delegate to an agent.
+    // Accept either path — what matters is we get a substantive response about Claude models.
+    let resultContent = '';
+    let agentId = null;
 
-    const spawned = await waitForAgentSpawn(feedsBefore, 30000);
-    assert.ok(spawned, 'Should spawn a browser agent');
+    const anyResponse = await Promise.race([
+      client.waitForFeed('doorman_response',
+        f => client.feeds.indexOf(f) >= feedsBefore, 60000),
+      waitForAgentResult(feedsBefore, 600000),
+    ]);
+    assert.ok(anyResponse, 'Should get a response (doorman or agent)');
 
-    // Verify it was routed to tool executor (browser needs tools)
-    const browserTask = Array.from(client.tasks.values())
-      .find(t => t.prompt?.includes('anthropic') || t.prompt?.includes('Claude models'));
-    if (browserTask) {
-      assert.equal(browserTask.executor, toolExecutor,
-        `Browser task should use ${toolExecutor}, got: ${browserTask.executor}`);
+    if (anyResponse.type === 'doorman_response') {
+      log(`  Doorman answered directly: ${anyResponse.content.slice(0, 100)}`);
+      resultContent = anyResponse.content;
+      // Still check if an agent was also spawned (may come later)
+      try {
+        const spawned = await waitForAgentSpawn(feedsBefore, 5000);
+        if (spawned) {
+          agentId = spawned.source;
+          const result = await waitForAgentResult(feedsBefore, 600000);
+          if (result) resultContent = result.content;
+        }
+      } catch { /* no agent — doorman handled it fully */ }
+    } else {
+      resultContent = anyResponse.content;
+      agentId = anyResponse.source;
+      log(`  Agent result: ${resultContent.length} chars`);
     }
 
-    const result = await waitForAgentResult(feedsBefore, 600000);
-    assert.ok(result, 'Should get browser result');
-    assert.ok(result.content.length > 50, 'Result should be substantive');
-    log(`  Result: ${result.content.length} chars`);
+    assert.ok(resultContent.length > 50, 'Result should be substantive');
 
     // Should mention at least one Claude model
-    const content = result.content.toLowerCase();
+    const content = resultContent.toLowerCase();
     const models = ['opus', 'sonnet', 'haiku', 'claude-3', 'claude-4', 'claude 3', 'claude 4'];
     const mentioned = models.filter(m => content.includes(m));
     assert.ok(mentioned.length >= 1, `Should mention Claude models, found: ${mentioned.join(', ')}`);
     log(`  Models mentioned: ${mentioned.join(', ')}`);
 
-    trackTask('browser-models', spawned.source, 'completed', result.content);
+    trackTask('browser-models', agentId, 'completed', resultContent);
   });
 
   await waitIdle(180000);
