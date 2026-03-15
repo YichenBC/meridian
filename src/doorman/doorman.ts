@@ -24,6 +24,12 @@ interface DoormanAction {
 const STATUS_PATTERNS = /^(.*\bstatus\b.*|what('s| is) (happening|going on)|show state|overview)\s*[.!?]*$/i;
 const KILL_ALL_PATTERNS = /^(stop|cancel|kill|abort|quit)\s*(all|everything|agents?|tasks?|it)?\s*[.!?]*$/i;
 const KILL_INTENT_PATTERNS = /^(stop|cancel|kill|abort|don'?t)\s+(the|that|this|my|posting|running|current)\b/i;
+// Interrupt-and-replace: "不要研究X了，改成Y" / "stop researching X, instead do Y" / "别X了，换成Y"
+const REPLACE_PATTERNS = [
+  /^(?:不要|别|不用|停止|取消).+?[了啦]?\s*[，,;；]\s*(?:改成|换成|改为|换为|改去|换去|替换成|instead|改|换)\s*(.+)/i,
+  /^(?:stop|cancel|don'?t|quit|abort)\s+.+?[,;]\s*(?:instead|rather|switch to|change to|replace with)\s+(.+)/i,
+  /^instead of .+?[,;]\s*(.+)/i,
+];
 const APPROVAL_POSITIVE = /\b(approve|yes|accept|confirm|ok|okay|go ahead|do it)\b/i;
 const APPROVAL_NEGATIVE = /\b(reject|no|deny|decline|don't|cancel)\b/i;
 
@@ -153,6 +159,30 @@ export class Doorman {
         this.runner.killAll();
         await this.respond(`Stopped all ${running.length} running task${running.length > 1 ? 's' : ''}.`, msg.channelId);
       }
+      return;
+    }
+
+    // Interrupt-and-replace: kill current task(s) and create a new one
+    const replaceMatch = REPLACE_PATTERNS.reduce<RegExpMatchArray | null>(
+      (found, pat) => found || trimmed.match(pat), null
+    );
+    if (replaceMatch && replaceMatch[1]?.trim()) {
+      const newPrompt = replaceMatch[1].trim();
+      const running = this.registry.getRunning();
+      if (running.length > 0) {
+        // Kill matching or all running tasks
+        const matchId = running.length === 1
+          ? running[0].id
+          : this.findRunningTaskByPrompt(trimmed, msg.channelId) || null;
+        if (matchId) {
+          this.runner.killAgent(matchId);
+        } else {
+          this.runner.killAll();
+        }
+      }
+      // Create replacement task
+      await this.createTask(newPrompt, this.toolExecutor, undefined, msg.channelId);
+      await this.respond(`Switched — now working on: ${newPrompt.slice(0, 80)}`, msg.channelId);
       return;
     }
 
