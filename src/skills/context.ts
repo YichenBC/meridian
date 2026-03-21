@@ -9,6 +9,8 @@ export interface BlackboardContext {
   sessionMemory?: string;
   /** Domain-specific system prompt (e.g., knowledge assistant spec) */
   domainSystemPrompt?: string;
+  /** Work experience notes scoped to this agent's context (skill-specific + global) */
+  experienceNotes?: Note[];
 }
 
 export interface PreparedTaskContext {
@@ -128,6 +130,17 @@ function buildBlackboardContext(ctx?: BlackboardContext): string {
     parts.push('## Blackboard Notes\n');
     for (const n of ctx.relevantNotes) {
       parts.push(`- **${n.title}** (${n.source}): ${n.content.slice(0, 500)}`);
+    }
+  }
+
+  if (ctx.experienceNotes && ctx.experienceNotes.length > 0) {
+    parts.push('## Work Experience (standing instructions — follow unless task explicitly overrides)\n');
+    let charCount = 0;
+    for (const n of ctx.experienceNotes) {
+      const line = `- **${n.title}**: ${n.content.slice(0, 300)}`;
+      charCount += line.length;
+      if (charCount > 3000) { parts.push('- *(additional experience notes truncated)*'); break; }
+      parts.push(line);
     }
   }
 

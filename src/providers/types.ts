@@ -13,9 +13,13 @@ export interface ProviderConfig {
   models: ProviderModelConfig[];
 }
 
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+
 export interface MessageParam {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ContentBlock[];
 }
 
 export interface SendMessageParams {

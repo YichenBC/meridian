@@ -207,6 +207,16 @@ export class HttpServer {
       return;
     }
 
+    // DELETE /api/notes/:id — delete a note (used by memory/experience skill)
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/notes/')) {
+      const id = url.pathname.slice('/api/notes/'.length);
+      if (!id) { res.writeHead(400); res.end(JSON.stringify({ error: 'Missing note ID' })); return; }
+      const existed = this.blackboard.deleteNote(id);
+      res.writeHead(existed ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(existed ? { deleted: id } : { error: 'Note not found' }));
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname.startsWith('/api/approve/')) {
       const id = url.pathname.split('/').pop()!;
       const approval = this.blackboard.getApproval(id);

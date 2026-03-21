@@ -4,6 +4,7 @@ export interface Channel {
   connect(): Promise<void>;
   sendMessage(text: string, targetChannelId?: string): Promise<void>;
   setTyping?(active: boolean, targetChannelId?: string): Promise<void>;
+  setReaction?(messageId: number, emoji: string, targetChannelId?: string): Promise<void>;
   isConnected(): boolean;
   disconnect(): Promise<void>;
 }
@@ -25,6 +26,8 @@ export interface UserMessage {
   sender: string;
   content: string;
   attachments?: Attachment[];
+  sourceMessageId?: number;  // platform message ID (e.g. Telegram message_id) for reactions/edit tracking
+  isEdit?: boolean;          // true when this is an edited message replacing a previous one
   timestamp: string;
 }
 

@@ -10,6 +10,8 @@ import { logger } from '../logger.js';
 /** Buffered media group: collects photos/docs with the same media_group_id */
 interface MediaGroupBuffer {
   chatId: string;
+  pmKey: string;       // pending media key (per-user in groups)
+  channelId: string;   // full channelId including userId for groups
   sender: string;
   caption: string;
   attachments: Attachment[];
@@ -27,7 +29,7 @@ interface PendingMedia {
   timer: NodeJS.Timeout;
 }
 
-const MEDIA_FOLLOWUP_MS = 8000; // wait 8s for follow-up text after media
+const MEDIA_FOLLOWUP_MS = 300_000; // wait 5 minutes for follow-up text after media
 
 export class TelegramChannel implements Channel {
   name = 'telegram';
@@ -86,33 +88,50 @@ export class TelegramChannel implements Channel {
       const chatId = ctx.chat.id.toString();
       if (this.chatId && chatId !== this.chatId) return;
 
+      const channelId = this.buildChannelId(ctx);
+      const pmKey = this.pendingMediaKey(ctx);
+      const messageId = ctx.message.message_id;
+
+      // Extract reply-to context from the quoted message
+      let content = ctx.message.text;
+      const reply = ctx.message.reply_to_message;
+      if (reply) {
+        const quoted = (reply.text || reply.caption || '').slice(0, 500);
+        if (quoted) {
+          const isBot = reply.from?.id === this.bot!.botInfo.id;
+          const label = isBot ? 'Meridian' : (reply.from?.first_name || reply.from?.username || 'user');
+          content = `[Replying to ${label}: "${quoted}"]\n\n${content}`;
+          logger.info({ chatId, messageId, replyTo: reply.message_id, fromBot: isBot }, 'Injecting reply-to context');
+        }
+      }
+
       // Check if there's pending media waiting for a follow-up text instruction
-      const pending = this.pendingMedia.get(chatId);
+      const pending = this.pendingMedia.get(pmKey);
       if (pending) {
         clearTimeout(pending.timer);
-        this.pendingMedia.delete(chatId);
-        logger.info({ chatId, attachments: pending.attachments.length, text: ctx.message.text.slice(0, 80) },
+        this.pendingMedia.delete(pmKey);
+        logger.info({ chatId, pmKey, attachments: pending.attachments.length, text: content.slice(0, 80) },
           'Combining follow-up text with pending media');
         this.onMessage({
           id: crypto.randomUUID(),
-          channelId: `tg:${chatId}`,
+          channelId,
           sender: this.getSenderName(ctx),
-          content: ctx.message.text,
+          content,
           attachments: pending.attachments,
+          sourceMessageId: messageId,
           timestamp: new Date(ctx.message.date * 1000).toISOString(),
         });
         return;
       }
 
-      const msg: UserMessage = {
+      this.onMessage({
         id: crypto.randomUUID(),
-        channelId: `tg:${chatId}`,
+        channelId,
         sender: this.getSenderName(ctx),
-        content: ctx.message.text,
+        content,
+        sourceMessageId: messageId,
         timestamp: new Date(ctx.message.date * 1000).toISOString(),
-      };
-
-      this.onMessage(msg);
+      });
     });
 
     // Photo messages (single or media group)
@@ -120,6 +139,9 @@ export class TelegramChannel implements Channel {
       logger.info({ chatId: ctx.chat.id, photoSizes: ctx.message.photo.length, caption: ctx.message.caption?.slice(0, 50) }, 'Received Telegram photo');
       const chatId = ctx.chat.id.toString();
       if (this.chatId && chatId !== this.chatId) return;
+
+      const channelId = this.buildChannelId(ctx);
+      const pmKey = this.pendingMediaKey(ctx);
 
       try {
         // Take largest photo size (last in array)
@@ -130,6 +152,8 @@ export class TelegramChannel implements Channel {
         if (mediaGroupId) {
           this.bufferMediaGroup(mediaGroupId, {
             chatId,
+            pmKey,
+            channelId,
             sender: this.getSenderName(ctx),
             caption: ctx.message.caption || '',
             attachment,
@@ -141,14 +165,15 @@ export class TelegramChannel implements Channel {
           if (caption) {
             this.onMessage({
               id: crypto.randomUUID(),
-              channelId: `tg:${chatId}`,
+              channelId,
               sender: this.getSenderName(ctx),
               content: caption,
               attachments: [attachment],
+              sourceMessageId: ctx.message.message_id,
               timestamp: new Date(ctx.message.date * 1000).toISOString(),
             });
           } else {
-            this.enqueuePendingMedia(chatId, this.getSenderName(ctx), [attachment],
+            this.enqueuePendingMedia(pmKey, chatId, this.getSenderName(ctx), [attachment],
               new Date(ctx.message.date * 1000).toISOString());
           }
         }
@@ -162,6 +187,9 @@ export class TelegramChannel implements Channel {
       const chatId = ctx.chat.id.toString();
       if (this.chatId && chatId !== this.chatId) return;
 
+      const channelId = this.buildChannelId(ctx);
+      const pmKey = this.pendingMediaKey(ctx);
+
       try {
         const doc = ctx.message.document;
         const contentType = doc.mime_type || 'application/octet-stream';
@@ -171,24 +199,110 @@ export class TelegramChannel implements Channel {
         if (mediaGroupId) {
           this.bufferMediaGroup(mediaGroupId, {
             chatId,
+            pmKey,
+            channelId,
             sender: this.getSenderName(ctx),
             caption: ctx.message.caption || '',
             attachment,
             timestamp: new Date(ctx.message.date * 1000).toISOString(),
           });
         } else {
-          this.onMessage({
-            id: crypto.randomUUID(),
-            channelId: `tg:${chatId}`,
-            sender: this.getSenderName(ctx),
-            content: ctx.message.caption || '',
-            attachments: [attachment],
-            timestamp: new Date(ctx.message.date * 1000).toISOString(),
-          });
+          const caption = ctx.message.caption || '';
+          if (caption) {
+            this.onMessage({
+              id: crypto.randomUUID(),
+              channelId,
+              sender: this.getSenderName(ctx),
+              content: caption,
+              attachments: [attachment],
+              sourceMessageId: ctx.message.message_id,
+              timestamp: new Date(ctx.message.date * 1000).toISOString(),
+            });
+          } else {
+            this.enqueuePendingMedia(pmKey, chatId, this.getSenderName(ctx), [attachment],
+              new Date(ctx.message.date * 1000).toISOString());
+          }
         }
       } catch (err) {
         logger.error({ err }, 'Failed to download Telegram document');
       }
+    });
+
+    // Voice messages — transcribe via Whisper API, then treat as text
+    this.bot.on('message:voice', async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      if (this.chatId && chatId !== this.chatId) return;
+
+      const channelId = this.buildChannelId(ctx);
+      const pmKey = this.pendingMediaKey(ctx);
+      const messageId = ctx.message.message_id;
+
+      try {
+        const voice = ctx.message.voice;
+        const attachment = await this.downloadFile(voice.file_id, 'audio/ogg', 'voice.ogg');
+
+        const transcript = await this.transcribeVoice(attachment.path);
+        if (transcript) {
+          logger.info({ chatId, messageId, chars: transcript.length }, 'Voice transcribed');
+
+          // Voice transcript consumes pending media (same as text)
+          const pending = this.pendingMedia.get(pmKey);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingMedia.delete(pmKey);
+            this.onMessage({
+              id: crypto.randomUUID(),
+              channelId,
+              sender: this.getSenderName(ctx),
+              content: transcript,
+              attachments: pending.attachments,
+              sourceMessageId: messageId,
+              timestamp: new Date(ctx.message.date * 1000).toISOString(),
+            });
+          } else {
+            this.onMessage({
+              id: crypto.randomUUID(),
+              channelId,
+              sender: this.getSenderName(ctx),
+              content: `[voice transcript] ${transcript}`,
+              sourceMessageId: messageId,
+              timestamp: new Date(ctx.message.date * 1000).toISOString(),
+            });
+          }
+        } else {
+          // STT unavailable — treat voice as audio attachment
+          logger.info({ chatId, messageId }, 'Voice STT unavailable, treating as audio attachment');
+          this.onMessage({
+            id: crypto.randomUUID(),
+            channelId,
+            sender: this.getSenderName(ctx),
+            content: '',
+            attachments: [attachment],
+            sourceMessageId: messageId,
+            timestamp: new Date(ctx.message.date * 1000).toISOString(),
+          });
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to handle voice message');
+      }
+    });
+
+    // Edited messages — cancel/replace the original task
+    this.bot.on('edited_message:text', (ctx) => {
+      const chatId = ctx.editedMessage.chat.id.toString();
+      if (this.chatId && chatId !== this.chatId) return;
+
+      const channelId = this.buildChannelId({ chat: ctx.editedMessage.chat, from: ctx.editedMessage.from });
+
+      this.onMessage({
+        id: crypto.randomUUID(),
+        channelId,
+        sender: ctx.editedMessage.from?.first_name || ctx.editedMessage.from?.username || 'Unknown',
+        content: ctx.editedMessage.text,
+        sourceMessageId: ctx.editedMessage.message_id,
+        isEdit: true,
+        timestamp: new Date(ctx.editedMessage.date * 1000).toISOString(),
+      });
     });
 
     this.bot.catch((err) => {
@@ -208,6 +322,17 @@ export class TelegramChannel implements Channel {
       await this.bot.api.sendChatAction(chatId, 'typing');
     } catch {
       // Typing indicator is best-effort
+    }
+  }
+
+  async setReaction(messageId: number, emoji: string, targetChannelId?: string): Promise<void> {
+    if (!this.bot) return;
+    const chatId = this.resolveTargetChatId(targetChannelId);
+    if (!chatId) return;
+    try {
+      await this.bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji } as any]);
+    } catch {
+      // Reaction is best-effort — may fail if bot lacks permission or emoji unsupported
     }
   }
 
@@ -303,6 +428,27 @@ export class TelegramChannel implements Channel {
     );
   }
 
+  /** Build channelId — includes userId for group chats to isolate per-user sessions */
+  private buildChannelId(ctx: any): string {
+    const chatId = ctx.chat.id.toString();
+    const chatType = ctx.chat.type; // 'private', 'group', 'supergroup', 'channel'
+    if (chatType === 'group' || chatType === 'supergroup') {
+      const userId = ctx.from?.id?.toString() || '0';
+      return `tg:${chatId}:${userId}`;
+    }
+    return `tg:${chatId}`;
+  }
+
+  /** Key for pending media — per-user in groups, per-chat in private */
+  private pendingMediaKey(ctx: any): string {
+    const chatId = ctx.chat.id.toString();
+    const chatType = ctx.chat.type;
+    if (chatType === 'group' || chatType === 'supergroup') {
+      return `${chatId}:${ctx.from?.id || 0}`;
+    }
+    return chatId;
+  }
+
   /**
    * Download a file from Telegram by file_id, save to data/media/.
    */
@@ -347,7 +493,7 @@ export class TelegramChannel implements Channel {
    */
   private bufferMediaGroup(
     mediaGroupId: string,
-    item: { chatId: string; sender: string; caption: string; attachment: Attachment; timestamp: string },
+    item: { chatId: string; pmKey: string; channelId: string; sender: string; caption: string; attachment: Attachment; timestamp: string },
   ): void {
     const existing = this.mediaGroups.get(mediaGroupId);
 
@@ -364,6 +510,8 @@ export class TelegramChannel implements Channel {
       const timer = setTimeout(() => this.flushMediaGroup(mediaGroupId), 500);
       this.mediaGroups.set(mediaGroupId, {
         chatId: item.chatId,
+        pmKey: item.pmKey,
+        channelId: item.channelId,
         sender: item.sender,
         caption: item.caption,
         attachments: [item.attachment],
@@ -385,23 +533,25 @@ export class TelegramChannel implements Channel {
     if (group.caption) {
       this.onMessage({
         id: crypto.randomUUID(),
-        channelId: `tg:${group.chatId}`,
+        channelId: group.channelId,
         sender: group.sender,
         content: group.caption,
         attachments: group.attachments,
         timestamp: group.timestamp,
       });
     } else {
-      this.enqueuePendingMedia(group.chatId, group.sender, group.attachments, group.timestamp);
+      this.enqueuePendingMedia(group.pmKey, group.chatId, group.sender, group.attachments, group.timestamp);
     }
   }
 
   /**
    * Enqueue media attachments waiting for a follow-up text instruction.
-   * If no text arrives within MEDIA_FOLLOWUP_MS, dispatch with default prompt.
+   * If no text arrives within MEDIA_FOLLOWUP_MS, discard and notify user.
+   * @param pmKey  pending-media key (per-user in groups, per-chat in private)
+   * @param chatId raw Telegram chat ID (for sending notifications)
    */
-  private enqueuePendingMedia(chatId: string, sender: string, attachments: Attachment[], timestamp: string): void {
-    const existing = this.pendingMedia.get(chatId);
+  private enqueuePendingMedia(pmKey: string, chatId: string, sender: string, attachments: Attachment[], timestamp: string): void {
+    const existing = this.pendingMedia.get(pmKey);
     if (existing) {
       // Append to existing pending media
       clearTimeout(existing.timer);
@@ -409,34 +559,81 @@ export class TelegramChannel implements Channel {
     }
 
     const timer = setTimeout(() => {
-      const pending = this.pendingMedia.get(chatId);
+      const pending = this.pendingMedia.get(pmKey);
       if (!pending) return;
-      this.pendingMedia.delete(chatId);
-      logger.info({ chatId, attachments: pending.attachments.length }, 'Dispatching pending media (no follow-up text)');
-      this.onMessage({
-        id: crypto.randomUUID(),
-        channelId: `tg:${chatId}`,
-        sender: pending.sender,
-        content: '',
-        attachments: pending.attachments,
-        timestamp: pending.timestamp,
-      });
+      this.pendingMedia.delete(pmKey);
+      const n = pending.attachments.length;
+      logger.info({ chatId, pmKey, attachments: n }, 'Pending media expired (no follow-up text)');
+      // Notify user instead of creating a task with empty prompt
+      if (this.bot) {
+        this.bot.api.sendMessage(Number(chatId),
+          `${n} file${n > 1 ? 's' : ''} expired — no instruction received within ${MEDIA_FOLLOWUP_MS / 60_000} min. Send again with your instruction.`,
+        ).catch(() => {});
+      }
     }, MEDIA_FOLLOWUP_MS);
 
     if (existing) {
       existing.timer = timer;
     } else {
-      this.pendingMedia.set(chatId, { chatId, sender, caption: '', attachments, timestamp, timer });
+      this.pendingMedia.set(pmKey, { chatId, sender, caption: '', attachments, timestamp, timer });
     }
 
-    logger.info({ chatId, attachments: (existing?.attachments.length ?? 0) + attachments.length },
-      `Media queued — waiting ${MEDIA_FOLLOWUP_MS / 1000}s for follow-up text`);
+    const totalCount = existing ? existing.attachments.length : attachments.length;
+    logger.info({ chatId, pmKey, attachments: totalCount },
+      `Media queued — waiting ${MEDIA_FOLLOWUP_MS / 60_000} min for follow-up text`);
+
+    // Notify user that media is buffered and awaiting instructions
+    if (this.bot) {
+      const label = totalCount === 1 ? '1 file received' : `${totalCount} files received`;
+      this.bot.api.sendMessage(Number(chatId),
+        `${label} — send me a text instruction to process ${totalCount > 1 ? 'them' : 'it'}.`,
+      ).catch(() => {});
+    }
   }
 
   private resolveTargetChatId(targetChannelId?: string): string | null {
     if (!targetChannelId) return this.chatId;
     if (!targetChannelId.startsWith('tg:')) return null;
-    return targetChannelId.slice(3);
+    // Handle both tg:{chatId} and tg:{chatId}:{userId} — extract only chatId
+    const rest = targetChannelId.slice(3);
+    const colonIdx = rest.indexOf(':');
+    return colonIdx >= 0 ? rest.slice(0, colonIdx) : rest;
+  }
+
+  /**
+   * Transcribe voice audio to text using OpenAI Whisper API.
+   * Returns null if OPENAI_API_KEY is not set or transcription fails.
+   */
+  private async transcribeVoice(filePath: string): Promise<string | null> {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      logger.info('OPENAI_API_KEY not set — voice transcription unavailable');
+      return null;
+    }
+
+    try {
+      const fileBuffer = fs.readFileSync(filePath);
+      const formData = new FormData();
+      formData.append('file', new Blob([fileBuffer], { type: 'audio/ogg' }), 'voice.ogg');
+      formData.append('model', 'whisper-1');
+
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        logger.error({ status: response.status }, 'Whisper API transcription failed');
+        return null;
+      }
+
+      const result = await response.json() as { text?: string };
+      return result.text?.trim() || null;
+    } catch (err) {
+      logger.error({ err }, 'Voice transcription error');
+      return null;
+    }
   }
 
   private async resolveProxy(): Promise<string | null> {
@@ -474,8 +671,54 @@ async function isProxyReachable(proxyUrl: string): Promise<boolean> {
   });
 }
 
+/**
+ * Convert markdown tables to scannable list format for Telegram readability.
+ * Tables with 2 columns → key: value pairs; 3+ columns → indented entries per row.
+ * Exported for testing.
+ */
+export function convertMarkdownTables(text: string): string {
+  // Match markdown tables: header row, separator row, data rows
+  const tableRe = /^(\|[^\n]+\|)\n(\|[\s:|-]+\|)\n((?:\|[^\n]+\|\n?)+)/gm;
+
+  return text.replace(tableRe, (match) => {
+    const lines = match.trim().split('\n');
+    if (lines.length < 3) return match; // need header + separator + at least 1 data row
+
+    const parseRow = (line: string) =>
+      line.split('|').slice(1, -1).map(cell => cell.trim());
+
+    const headers = parseRow(lines[0]);
+    // lines[1] is the separator row — skip it
+    const rows = lines.slice(2).map(parseRow);
+
+    if (headers.length === 0 || rows.length === 0) return match;
+
+    if (headers.length === 2) {
+      // Two-column table → compact key: value pairs
+      return rows
+        .filter(r => r.length >= 2)
+        .map(r => `${r[0]}: ${r[1]}`)
+        .join('\n') + '\n';
+    }
+
+    // 3+ column table → entry blocks with header labels
+    return rows
+      .filter(r => r.length >= headers.length)
+      .map(r => {
+        const firstCell = r[0];
+        const rest = headers.slice(1)
+          .map((h, i) => `  ${h}: ${r[i + 1]}`)
+          .join('\n');
+        return `${firstCell}\n${rest}`;
+      })
+      .join('\n\n') + '\n';
+  });
+}
+
 function markdownToTelegramHtml(text: string): string {
-  let html = escapeHtml(text);
+  // Convert tables to lists before HTML conversion
+  let processed = convertMarkdownTables(text);
+  let html = escapeHtml(processed);
   html = html.replace(/```(?:\w*)\n([\s\S]*?)```/g, '<pre>$1</pre>');
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');

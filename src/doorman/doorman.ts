@@ -64,6 +64,10 @@ export class Doorman {
   private cliPath: string;
   private toolExecutor: string;
   private codexRuntime: CodexRuntime | null = null;
+  /** Maps taskId → { channelId, messageId } for reaction lifecycle updates */
+  private taskMessageMap = new Map<string, { channelId: string; messageId: number }>();
+  /** Maps channelId:messageId → taskId for edit interception */
+  private messageToTask = new Map<string, string>();
 
   constructor(
     private blackboard: Blackboard,
@@ -99,6 +103,13 @@ export class Doorman {
     this.blackboard.on('task:updated', (task: Task) => {
       const channelId = this.resolveRouteableSource(task.source);
       if (!channelId) return;
+
+      // Update reaction on the original user message
+      if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+        const emoji = task.status === 'completed' ? '✅' : '❌';
+        this.setReactionForTask(task.id, emoji);
+      }
+
       if (task.status === 'completed' && task.result) {
         if (task.executor === 'skill-installer') {
           this.sendToChannels(task.result, channelId);
@@ -119,6 +130,28 @@ export class Doorman {
   }
 
   async handleMessage(msg: UserMessage): Promise<void> {
+    // Set initial reaction to acknowledge receipt
+    if (msg.sourceMessageId) {
+      this.setReactionOnChannels(msg.sourceMessageId, '👀', msg.channelId);
+    }
+
+    // Handle edited messages: cancel old task and re-create with new text
+    if (msg.isEdit && msg.sourceMessageId) {
+      const key = `${msg.channelId}:${msg.sourceMessageId}`;
+      const oldTaskId = this.messageToTask.get(key);
+      if (oldTaskId) {
+        const oldTask = this.blackboard.getTask(oldTaskId);
+        if (oldTask && (oldTask.status === 'pending' || oldTask.status === 'running')) {
+          const agent = this.registry.getRunning().find(a => a.currentTaskId === oldTaskId);
+          if (agent) this.runner.killAgent(agent.id);
+          else this.blackboard.updateTask(oldTaskId, { status: 'cancelled' });
+          logger.info({ oldTaskId, messageId: msg.sourceMessageId }, 'Cancelled task due to message edit');
+          await this.respond('Message edited — reprocessing with updated text.', msg.channelId);
+        }
+      }
+      // Fall through to normal handling with the edited content
+    }
+
     this.blackboard.addFeed({
       id: crypto.randomUUID(),
       type: 'user_message',
@@ -181,7 +214,7 @@ export class Doorman {
         }
       }
       // Create replacement task
-      await this.createTask(newPrompt, this.toolExecutor, undefined, msg.channelId);
+      await this.createTask(newPrompt, this.toolExecutor, undefined, msg.channelId, msg.sourceMessageId);
       await this.respond(`Switched — now working on: ${newPrompt.slice(0, 80)}`, msg.channelId);
       return;
     }
@@ -223,7 +256,7 @@ export class Doorman {
     // Skill install intent: route through the blackboard task pipeline, not direct mutation
     const installIntent = parseSkillInstallIntent(trimmed);
     if (installIntent) {
-      await this.createTask(buildSkillInstallTaskPrompt(installIntent.reference), 'skill-installer', undefined, msg.channelId);
+      await this.createTask(buildSkillInstallTaskPrompt(installIntent.reference), 'skill-installer', undefined, msg.channelId, msg.sourceMessageId);
       await this.respond(`Installing skill "${installIntent.reference}".`, msg.channelId);
       return;
     }
@@ -235,7 +268,7 @@ export class Doorman {
         ? `${trimmed}\n\n${mediaNote}`
         : `Process the attached file(s).\n\n${mediaNote}`;
       logger.info({ msg: trimmed.slice(0, 80), attachments: msg.attachments.length }, 'Fast-path: routing media as task');
-      await this.createTask(taskPrompt, this.toolExecutor, undefined, msg.channelId);
+      await this.createTask(taskPrompt, this.toolExecutor, undefined, msg.channelId, msg.sourceMessageId);
       await this.respond(`Got it — processing ${msg.attachments.length} file${msg.attachments.length > 1 ? 's' : ''}.`, msg.channelId);
       return;
     }
@@ -243,7 +276,7 @@ export class Doorman {
     // --- Fast-path task routing: skip LLM triage for obvious work requests ---
     if (FAST_TASK_PATTERNS.some(p => p.test(trimmed))) {
       logger.info({ msg: trimmed.slice(0, 80) }, 'Fast-path: routing as task (skipping triage)');
-      await this.createTask(trimmed, this.toolExecutor, undefined, msg.channelId);
+      await this.createTask(trimmed, this.toolExecutor, undefined, msg.channelId, msg.sourceMessageId);
       await this.respond("On it.", msg.channelId);
       return;
     }
@@ -255,7 +288,7 @@ export class Doorman {
     // Execute actions
     if (action.tasks && action.tasks.length > 0) {
       for (const t of action.tasks) {
-        await this.createTask(t.prompt, t.executor, t.model, msg.channelId);
+        await this.createTask(t.prompt, t.executor, t.model, msg.channelId, msg.sourceMessageId);
       }
     }
 
@@ -275,6 +308,11 @@ export class Doorman {
     }
 
     await this.respond(action.response, msg.channelId);
+
+    // If doorman responded directly (no task), mark as done
+    if ((!action.tasks || action.tasks.length === 0) && msg.sourceMessageId) {
+      this.setReactionOnChannels(msg.sourceMessageId, '✅', msg.channelId);
+    }
   }
 
   /**
@@ -311,6 +349,12 @@ export class Doorman {
     // Include recent task results so Doorman remembers what agents discovered
     const recentResults = this.buildRecentResults(state, channelId);
 
+    // Inject orchestration experience (routing/triage lessons from the user)
+    const orchExp = this.blackboard.getNotesByTag('exp:orchestration');
+    const orchCtx = orchExp.length > 0
+      ? `\nOrchestration experience (follow these routing preferences): ${orchExp.slice(0, 10).map(m => `${m.title}: ${m.content.slice(0, 150)}`).join(' | ')}`
+      : '';
+
     // The prompt: user message + routing context + agent results
     const prompt = `You are Meridian — a personal AI agent system. You are always on, always responsive. You are the user's primary interface to the system.
 
@@ -342,7 +386,7 @@ Examples (follow these patterns):
 
 When delegating, set "response" to a brief natural ack and create tasks. Use executor "${this.toolExecutor}" for tasks needing tools/files/shell/MCP. Omit executor for pure text generation. Optionally set "model" to override the default model for cost control.
 
-Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 'pending').length} queued, ${scopedTasks.filter(t => t.status === 'completed').length} completed.${runningCtx}${skillCtx}${mcpCtx}${recentResults}
+Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 'pending').length} queued, ${scopedTasks.filter(t => t.status === 'completed').length} completed.${runningCtx}${skillCtx}${mcpCtx}${recentResults}${orchCtx}
 
     User message: ${content}`;
 
@@ -623,7 +667,7 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     return bestScore > 0 ? bestId : null;
   }
 
-  private async createTask(prompt: string, executor?: string, model?: string, source?: string): Promise<void> {
+  private async createTask(prompt: string, executor?: string, model?: string, source?: string, sourceMessageId?: number): Promise<string> {
     let enrichedPrompt = prompt;
     if (this.isToolExecutor(executor) && /\b(blackboard|database|sqlite|system.?check|self.?check|diagnos|state|db)\b/i.test(prompt)) {
       enrichedPrompt = `${prompt}\n\nContext: Meridian's blackboard is a SQLite database at ${channelDbPath}. Tables: tasks, agents, feeds, approvals, notes, sessions. Project root: ${process.cwd()}`;
@@ -648,6 +692,16 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
     };
 
     this.blackboard.createTask(task);
+
+    // Track message → task mapping for reactions and edit interception
+    if (sourceMessageId && source) {
+      this.taskMessageMap.set(task.id, { channelId: source, messageId: sourceMessageId });
+      this.messageToTask.set(`${source}:${sourceMessageId}`, task.id);
+      // Set ⚙️ reaction to indicate task is being processed
+      this.setReactionOnChannels(sourceMessageId, '⚙️', source);
+    }
+
+    return task.id;
   }
 
   private isToolExecutor(executor?: string): boolean {
@@ -717,6 +771,25 @@ Live context: ${running.length} running, ${scopedTasks.filter(t => t.status === 
         await channel.sendMessage(text, channelId);
       }
     }
+  }
+
+  /** Set reaction on a user's message across all channels (best-effort) */
+  private setReactionOnChannels(messageId: number, emoji: string, channelId?: string): void {
+    for (const channel of this.channels) {
+      if (channel.isConnected() && channel.setReaction) {
+        channel.setReaction(messageId, emoji, channelId).catch(() => {});
+      }
+    }
+  }
+
+  /** Update reaction for a tracked task */
+  private setReactionForTask(taskId: string, emoji: string): void {
+    const info = this.taskMessageMap.get(taskId);
+    if (!info) return;
+    this.setReactionOnChannels(info.messageId, emoji, info.channelId);
+    // Clean up tracking after terminal state
+    this.taskMessageMap.delete(taskId);
+    this.messageToTask.delete(`${info.channelId}:${info.messageId}`);
   }
 
   private resolveRouteableSource(source?: string): string | undefined {

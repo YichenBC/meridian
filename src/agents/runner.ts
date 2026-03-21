@@ -626,7 +626,25 @@ export class AgentRunner {
       } catch { /* file may not exist */ }
     }
 
-    return (ctx.blockerResults?.length || ctx.relevantNotes?.length || ctx.sessionMemory || ctx.domainSystemPrompt) ? ctx : undefined;
+    // Inject scoped work experience (global + skill-specific, NOT orchestration)
+    const globalExp = this.blackboard.getNotesByTag('exp:global');
+    // Try to match skill-specific experience based on task prompt keywords
+    const allSkillExp = this.blackboard.getNotesByTag('exp:skill');
+    // Filter skill experience: only include notes whose tag matches a keyword in the prompt
+    const promptLower = task.prompt.toLowerCase();
+    const relevantSkillExp = allSkillExp.filter(n => {
+      // Extract skill name from tag like "exp:skill:knowledge-ingest"
+      const skillTag = (n.tags || '').split(',').find(t => t.trim().startsWith('exp:skill:'));
+      if (!skillTag) return false;
+      const skillName = skillTag.trim().slice('exp:skill:'.length);
+      return promptLower.includes(skillName) || promptLower.includes(skillName.replace(/-/g, ' '));
+    });
+    const experienceNotes = [...globalExp, ...relevantSkillExp].slice(0, 15);
+    if (experienceNotes.length > 0) {
+      ctx.experienceNotes = experienceNotes;
+    }
+
+    return (ctx.blockerResults?.length || ctx.relevantNotes?.length || ctx.sessionMemory || ctx.domainSystemPrompt || ctx.experienceNotes?.length) ? ctx : undefined;
   }
 
   /**

@@ -1,5 +1,6 @@
+import { readFileSync } from 'fs';
 import { Task } from '../types.js';
-import { ModelProvider } from '../providers/types.js';
+import { ModelProvider, ContentBlock } from '../providers/types.js';
 import { PreparedTaskContext } from '../skills/context.js';
 
 export interface ExecuteParams {
@@ -42,10 +43,11 @@ export class LLMExecutor implements AgentExecutor {
     const { prepared, signal, model: modelOverride, onProgress } = params;
 
     const effectiveModel = modelOverride || this.model;
+    const content = buildUserContent(prepared.userPrompt);
     const result = await this.provider.streamMessage({
       model: effectiveModel,
       system: prepared.systemPrompt,
-      messages: [{ role: 'user', content: prepared.userPrompt }],
+      messages: [{ role: 'user', content }],
       maxTokens: 8192,
       signal,
       onText: (chunk) => {
@@ -62,6 +64,50 @@ export class LLMExecutor implements AgentExecutor {
       },
     };
   }
+}
+
+/**
+ * Extract image paths from the prompt and build multimodal content blocks.
+ * Matches the format: [media attached: "/path/to/file" (image/...)]
+ * or [media attached: /path/to/file (image/...)]
+ */
+// Matches: [media attached: /path (type)] or [media attached: "name" /path (type)]
+// Also:    [media 1/2: /path (type)] or [media 1/2: "name" /path (type)]
+const MEDIA_RE = /\[media(?:\s+attached|\s+\d+\/\d+):(?:\s+"[^"]*")?\s+(\/[^\s(]+)\s+\(([^)]+)\)\]/g;
+
+function buildUserContent(prompt: string): string | ContentBlock[] {
+  const images: ContentBlock[] = [];
+  let textPrompt = prompt;
+
+  for (const match of prompt.matchAll(MEDIA_RE)) {
+    const filePath = match[1];
+    const mimeType = match[2];
+
+    if (!mimeType.startsWith('image/')) continue;
+
+    try {
+      const data = readFileSync(filePath).toString('base64');
+      images.push({
+        type: 'image',
+        source: { type: 'base64', media_type: mimeType, data },
+      });
+      textPrompt = textPrompt.replace(match[0], '').trim();
+    } catch {
+      // File not found — leave the text reference in the prompt
+    }
+  }
+
+  if (images.length === 0) return prompt;
+
+  // Also remove the multi-file header line if present
+  textPrompt = textPrompt.replace(/\[media attached: \d+ files\]\s*/g, '').trim();
+
+  const blocks: ContentBlock[] = [];
+  blocks.push(...images);
+  if (textPrompt) {
+    blocks.push({ type: 'text', text: textPrompt });
+  }
+  return blocks;
 }
 
 /**

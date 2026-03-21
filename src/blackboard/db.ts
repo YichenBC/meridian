@@ -337,6 +337,11 @@ export function getNotesByTag(tag: string): Note[] {
   return stmt.all(`%${escaped}%`) as Note[];
 }
 
+export function deleteNote(id: string): boolean {
+  const stmt = db.prepare('DELETE FROM notes WHERE id = ?');
+  return stmt.run(id).changes > 0;
+}
+
 // --- Sessions ---
 
 export function createSession(session: Session): void {

@@ -169,6 +169,12 @@ export class Blackboard extends EventEmitter {
     return db.getNotesByTag(tag);
   }
 
+  deleteNote(id: string): boolean {
+    const result = db.deleteNote(id);
+    if (result) this.emit('note:deleted', { id });
+    return result;
+  }
+
   // --- Sessions ---
 
   createSession(session: Session): void {
